@@ -820,7 +820,7 @@ static void* HookGetMovieClipChild(void* movieClip, const void* childName)
 
 static void* HookBindSingingButton(void* house, void** movieClip, void** owner)
 {
-    static const char replacementTitle[17] = "Cat Appearance";
+    static const char replacementTitle[17] = "Cat Editor";
     void* result;
     void* customResult;
     void* callback;
