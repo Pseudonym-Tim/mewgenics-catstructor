@@ -35,11 +35,11 @@ Use the sliders, `<` and `>` buttons, dropdowns, and **ID:** fields to change th
 
 * **NEW CAT** - Creates a new randomized, unsaved cat
 
-* **RANDOMIZE** - Randomizes the current cat's appearanc
+* **RANDOMIZE** - Randomizes the current cat's appearance
 
 * **COPY DATA** - Copies the cat's complete `.gon` data entry to your clipboard
 
-* **SAVE PNG** - Saves a transparent PNG image of your cat in:
+* **SAVE PNG** - Saves a PNG image of your cat in:
 
   ```text
   Catstructor\cat_images
@@ -51,9 +51,9 @@ Use the sliders, `<` and `>` buttons, dropdowns, and **ID:** fields to change th
 
 Choose a voice from the **voice** dropdown, adjust the **pitch** slider, and click **MEOW** to preview it.
 
-### Loading Cats
+### Loading/Saving Cats
 
-Use the **custom_cats.gon preset** dropdown to preview existing cats from the game's loaded `custom_cats.gon`
+Use the **custom_cats.gon preset** dropdown to load existing cats from the game's `custom_cats.gon` file
 
 Use the **saved cats** dropdown to load or delete `.catstruct` files from the `saved_cats` folder.
 
