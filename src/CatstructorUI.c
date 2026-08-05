@@ -4,7 +4,7 @@
 * Editor widgets, appearance controls, scene rendering stuff... 
 */
 
-static void SetDefaultDebugWindowSize(void)
+static void SetLockedEditorWindowGeometry(void)
 {
     uint8_t* context;
 
@@ -15,10 +15,16 @@ static void SetDefaultDebugWindowSize(void)
         return;
     }
 
-    *(int*)(context + IMGUI_NEXT_WINDOW_FLAGS_OFFSET) |= IMGUI_NEXT_WINDOW_HAS_SIZE;
-    *(float*)(context + IMGUI_NEXT_WINDOW_SIZE_OFFSET) = DEBUG_WINDOW_DEFAULT_WIDTH;
-    *(float*)(context + IMGUI_NEXT_WINDOW_SIZE_OFFSET + sizeof(float)) = DEBUG_WINDOW_DEFAULT_HEIGHT;
-    *(int*)(context + IMGUI_NEXT_WINDOW_SIZE_COND_OFFSET) = IMGUI_COND_FIRST_USE_EVER;
+    /* 
+    * Keep the controls wholly inside the left half of a 1280x720 stage (FLA/SWF resolution)...
+    */
+    *(int*)(context + IMGUI_NEXT_WINDOW_FLAGS_OFFSET) |= IMGUI_NEXT_WINDOW_HAS_POS | IMGUI_NEXT_WINDOW_HAS_SIZE;
+    *(float*)(context + IMGUI_NEXT_WINDOW_POS_OFFSET) = DEBUG_WINDOW_LOCKED_X;
+    *(float*)(context + IMGUI_NEXT_WINDOW_POS_OFFSET + sizeof(float)) = DEBUG_WINDOW_LOCKED_Y;
+    *(float*)(context + IMGUI_NEXT_WINDOW_SIZE_OFFSET) = DEBUG_WINDOW_LOCKED_WIDTH;
+    *(float*)(context + IMGUI_NEXT_WINDOW_SIZE_OFFSET + sizeof(float)) = DEBUG_WINDOW_LOCKED_HEIGHT;
+    *(int*)(context + IMGUI_NEXT_WINDOW_POS_COND_OFFSET) = IMGUI_COND_ALWAYS;
+    *(int*)(context + IMGUI_NEXT_WINDOW_SIZE_COND_OFFSET) = IMGUI_COND_ALWAYS;
 }
 
 static uint8_t* GetCurrentImGuiWindow(void)
@@ -1868,14 +1874,14 @@ void HookSceneDraw(void* scene)
         return;
     }
 
-    SetDefaultDebugWindowSize();
+    SetLockedEditorWindowGeometry();
 
     if (!g_editorWindowOpen)
     {
         return;
     }
 
-    if (!g_imguiBegin("Catstructor Editor", &g_editorWindowOpen, 0))
+    if (!g_imguiBegin("Catstructor Editor", &g_editorWindowOpen, IMGUI_WINDOW_FLAGS_NO_RESIZE | IMGUI_WINDOW_FLAGS_NO_MOVE | IMGUI_WINDOW_FLAGS_NO_COLLAPSE | IMGUI_WINDOW_FLAGS_NO_SAVED_SETTINGS))
     {
         g_activeIDInput = APPEARANCE_FIELD_COUNT;
         g_imguiEnd();

@@ -1033,7 +1033,12 @@ static int ReadScreenshotFrontFrame(uint8_t** outPixels, int* outWidth, int* out
 
     glGetIntegerv(GL_VIEWPORT, viewport);
 
-    width = viewport[2] * SCREENSHOT_CAPTURE_WIDTH_PERCENT / 100;
+    /* 
+    * Capture the whole framebuffer. CatAppearanceUI.b0 is authored in Flash
+    * stage space, but the native CatVisual is transformed by the game renderer,
+    * so its framebuffer X position can therefore land on either side of the screen...
+    */
+    width = viewport[2];
     height = viewport[3];
 
     if (width <= 0 || height <= 0 || width > SCREENSHOT_MAX_DIMENSION || height > SCREENSHOT_MAX_DIMENSION || width > 0x7FFFFFFF / height)
@@ -1201,16 +1206,25 @@ static uint8_t ReconstructScreenshotColorChannel(uint8_t blackValue, uint8_t whi
     return (uint8_t)value;
 }
 
-static size_t ClearScreenshotBorderAlpha(uint8_t* alphaMask, int width, int height, int* queue)
+static size_t FilterScreenshotAlphaComponents(uint8_t* alphaMask, int width, int height, int* work)
 {
     size_t removed;
     int head;
     int tail;
+    int pixelCount;
     int index;
     int x;
     int y;
+    int current;
+    int next;
+    int neighbor;
+    int componentHead;
+    int componentTail;
+    int componentCount;
+    int largestHead;
+    int largestCount;
 
-    if (!alphaMask || !queue || width <= 0 || height <= 0)
+    if (!alphaMask || !work || width <= 0 || height <= 0)
     {
         return 0;
     }
@@ -1218,7 +1232,9 @@ static size_t ClearScreenshotBorderAlpha(uint8_t* alphaMask, int width, int heig
     head = 0;
     tail = 0;
     removed = 0;
+    pixelCount = width * height;
 
+    // First discard coverage connected to the true framebuffer border...
     for (x = 0; x < width; ++x)
     {
         index = x;
@@ -1226,7 +1242,7 @@ static size_t ClearScreenshotBorderAlpha(uint8_t* alphaMask, int width, int heig
         if (alphaMask[index] != 0U)
         {
             alphaMask[index] = 0U;
-            queue[tail++] = index;
+            work[tail++] = index;
             ++removed;
         }
 
@@ -1235,7 +1251,7 @@ static size_t ClearScreenshotBorderAlpha(uint8_t* alphaMask, int width, int heig
         if (height > 1 && alphaMask[index] != 0U)
         {
             alphaMask[index] = 0U;
-            queue[tail++] = index;
+            work[tail++] = index;
             ++removed;
         }
     }
@@ -1247,52 +1263,178 @@ static size_t ClearScreenshotBorderAlpha(uint8_t* alphaMask, int width, int heig
         if (alphaMask[index] != 0U)
         {
             alphaMask[index] = 0U;
-            queue[tail++] = index;
+            work[tail++] = index;
             ++removed;
         }
 
-        index = y * width + (width - 1);
+        index = y * width + width - 1;
 
         if (width > 1 && alphaMask[index] != 0U)
         {
             alphaMask[index] = 0U;
-            queue[tail++] = index;
+            work[tail++] = index;
             ++removed;
         }
     }
 
     while (head < tail)
     {
-        index = queue[head++];
+        index = work[head++];
         x = index % width;
         y = index / width;
 
         if (x > 0 && alphaMask[index - 1] != 0U)
         {
             alphaMask[index - 1] = 0U;
-            queue[tail++] = index - 1;
+            work[tail++] = index - 1;
             ++removed;
         }
 
         if (x + 1 < width && alphaMask[index + 1] != 0U)
         {
             alphaMask[index + 1] = 0U;
-            queue[tail++] = index + 1;
+            work[tail++] = index + 1;
             ++removed;
         }
 
         if (y > 0 && alphaMask[index - width] != 0U)
         {
             alphaMask[index - width] = 0U;
-            queue[tail++] = index - width;
+            work[tail++] = index - width;
             ++removed;
         }
 
         if (y + 1 < height && alphaMask[index + width] != 0U)
         {
             alphaMask[index + width] = 0U;
-            queue[tail++] = index + width;
+            work[tail++] = index + width;
             ++removed;
+        }
+    }
+
+    /* 
+    * Reuse work as a per-pixel linked-list and visited map. Zero means the
+    * pixel is unvisited, -1 ends a component list, and positive values store
+    * the next pixel index plus one. (This preserves original alpha values)...
+    */
+    for (index = 0; index < pixelCount; ++index)
+    {
+        work[index] = 0;
+    }
+
+    largestHead = -1;
+    largestCount = 0;
+
+    for (index = 0; index < pixelCount; ++index)
+    {
+        if (alphaMask[index] == 0U || work[index] != 0)
+        {
+            continue;
+        }
+
+        componentHead = index;
+        componentTail = index;
+        componentCount = 0;
+        work[index] = -1;
+        current = componentHead;
+
+        while (current >= 0)
+        {
+            ++componentCount;
+            x = current % width;
+            y = current / width;
+
+            if (x > 0)
+            {
+                neighbor = current - 1;
+
+                if (alphaMask[neighbor] != 0U && work[neighbor] == 0)
+                {
+                    work[neighbor] = -1;
+                    work[componentTail] = neighbor + 1;
+                    componentTail = neighbor;
+                }
+            }
+
+            if (x + 1 < width)
+            {
+                neighbor = current + 1;
+
+                if (alphaMask[neighbor] != 0U && work[neighbor] == 0)
+                {
+                    work[neighbor] = -1;
+                    work[componentTail] = neighbor + 1;
+                    componentTail = neighbor;
+                }
+            }
+
+            if (y > 0)
+            {
+                neighbor = current - width;
+
+                if (alphaMask[neighbor] != 0U && work[neighbor] == 0)
+                {
+                    work[neighbor] = -1;
+                    work[componentTail] = neighbor + 1;
+                    componentTail = neighbor;
+                }
+            }
+
+            if (y + 1 < height)
+            {
+                neighbor = current + width;
+
+                if (alphaMask[neighbor] != 0U && work[neighbor] == 0)
+                {
+                    work[neighbor] = -1;
+                    work[componentTail] = neighbor + 1;
+                    componentTail = neighbor;
+                }
+            }
+
+            next = work[current];
+            current = next < 0 ? -1 : next - 1;
+        }
+
+        if (componentCount > largestCount)
+        {
+            if (largestHead >= 0)
+            {
+                current = largestHead;
+
+                while (current >= 0)
+                {
+                    next = work[current];
+
+                    if (alphaMask[current] != 0U)
+                    {
+                        alphaMask[current] = 0U;
+                        ++removed;
+                    }
+
+                    current = next < 0 ? -1 : next - 1;
+                }
+            }
+
+            largestHead = componentHead;
+            largestCount = componentCount;
+        }
+        else
+        {
+            current = componentHead;
+
+            while (current >= 0)
+            {
+                next = work[current];
+
+                if (alphaMask[current] != 0U)
+                {
+                    alphaMask[current] = 0U;
+                    ++removed;
+                }
+
+                current = next < 0 ? -1 : next - 1;
+            }
         }
     }
 
@@ -1432,11 +1574,8 @@ int CaptureCatScreenshot(void)
         }
     }
 
-    /* Post-process or swap timing difference can leave low-alpha coverage
-    * touching the capture edges even when both controlled backgrounds were
-    * applied correctly. Remove only alpha connected to the outer border,
-    * transparent gaps inside the cat remain untouched... */
-    removedBorderPixels = ClearScreenshotBorderAlpha(alphaMask, width, height, borderQueue);
+    // Remove edge-connected render noise, then keep the largest remaining alpha component...
+    removedBorderPixels = FilterScreenshotAlphaComponents(alphaMask, width, height, borderQueue);
 
     left = width;
     bottom = height;
@@ -1456,6 +1595,7 @@ int CaptureCatScreenshot(void)
             }
 
             ++area;
+            
             if (x < left) left = x;
             if (x > right) right = x;
             if (y < bottom) bottom = y;
@@ -1468,7 +1608,7 @@ int CaptureCatScreenshot(void)
         free(borderQueue);
         free(alphaMask);
         free(whiteFrame);
-        AddDebugMessage("Screenshot failed: Cat pixels were not found after removing edge-connected render artifacts!");
+        AddDebugMessage("Screenshot failed: Cat pixels were not found after component filtering!");
         return 0;
     }
 
