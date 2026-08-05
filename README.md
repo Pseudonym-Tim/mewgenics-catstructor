@@ -75,8 +75,9 @@ You should then see that your cat updates to reflect the colors of your palette.
 
 Custom palette IDs are preserved when saving your cat or copying its `.gon` data.
 
-### Future Custom Part/Texture Support
+### Future Support
 
 A custom cat-part and texture framework is almost finished and will be released in the future.
-
 Once released, Catstructor will receive additional editor functionality for selecting and entering custom modded cat parts and textures, similar to its current support for custom modded palettes.
+
+Additionally, a way to add/view items or equipment on cats would also be something that is considered
