@@ -66,7 +66,6 @@ unsigned char g_paletteBlankRows[APPEARANCE_MAX_ID + 1];
 volatile LONG g_paletteInfoReady;
 volatile LONG g_paletteInfoGeneration;
 int g_paletteHeight;
-static int g_imageDecoderHookSafe;
 int g_timelineVisualNeedsRefresh;
 void* g_timelineValidatedVisual[APPEARANCE_FIELD_COUNT];
 int g_timelineValidatedValue[APPEARANCE_FIELD_COUNT];
@@ -609,27 +608,6 @@ static void RestorePatch(PatchBackup* backup)
 
     backup->address = NULL;
     backup->length = 0;
-}
-
-static int ImageDecoderAnchorIsSupported(const unsigned char* imageDecodeStart, const unsigned char* expectedImageDecodeStart, size_t expectedLength)
-{
-    int managedHookCount;
-
-    if (memcmp(imageDecodeStart, expectedImageDecodeStart, expectedLength) == 0)
-    {
-        return 1;
-    }
-
-    managedHookCount = g_mj.QueryHook ? g_mj.QueryHook(RVA_IMAGE_DECODE_FROM_MEMORY) : 0;
-
-    if (managedHookCount > 0)
-    {
-        // Mewjector already owns the prologue, (usually because MewPaletteExtender got here first). InstallHook safely splices us into the existing chain...
-        Log("Image decoder already has %d Mewjector-managed hook(s); accepting the managed chain instead of raw prologue bytes.", managedHookCount);
-        return 1;
-    }
-    
-    return 0;
 }
 
 static void* ResolveRva(UINT_PTR rva)
@@ -1354,24 +1332,19 @@ static void InstallRuntime(void)
 
     trampoline = NULL;
 
-    if (g_imageDecoderHookSafe)
+    /*
+    * Always ask Mewjector to install the palette-inspection hook. The old safety flag was
+    * never initialized, so this block was permanently skipped. Priority 5 keeps us before
+    * MewPaletteExtender's priority-10 hook, so our trampoline returns the extender's final
+    * resized palette and lets us cache both its real height and the blank marker rows.
+    */
+    if (InstallHookAtPriority(RVA_IMAGE_DECODE_FROM_MEMORY, IMAGE_DECODE_HOOK_STOLEN_BYTES, HookImageDecodeFromMemory, &trampoline, 5))
     {
-        /*
-        * Priority 5 puts us before MewPaletteExtender's priority-10 hook. Calling our trampoline 
-        * then returns the extender's final resized palette instead of the vanilla buffer....
-        */
-        if (InstallHookAtPriority(RVA_IMAGE_DECODE_FROM_MEMORY, IMAGE_DECODE_HOOK_STOLEN_BYTES, HookImageDecodeFromMemory, &trampoline, 5))
-        {
-            g_originalImageDecodeFromMemory = (fn_image_decode_from_memory)trampoline;
-        }
-        else
-        {
-            Log("Could not join the image-decoder hook chain, continuing with the core editor hooks!");
-        }
+        g_originalImageDecodeFromMemory = (fn_image_decode_from_memory)trampoline;
     }
     else
     {
-        Log("Image decoder is patched outside Mewjector's managed chain, skipping palette inspection and continuing with the core editor hooks!");
+        Log("Could not join the image-decoder hook chain, continuing with the core editor hooks!");
     }
 
     trampoline = NULL;

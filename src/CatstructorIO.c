@@ -1032,6 +1032,7 @@ static int ReadScreenshotFrontFrame(uint8_t** outPixels, int* outWidth, int* out
     *outHeight = 0;
 
     glGetIntegerv(GL_VIEWPORT, viewport);
+
     width = viewport[2] * SCREENSHOT_CAPTURE_WIDTH_PERCENT / 100;
     height = viewport[3];
 
