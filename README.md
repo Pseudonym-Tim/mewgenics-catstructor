@@ -21,7 +21,7 @@ After launching the game with Developer Mode enabled, click the new **Cat Editor
 
 ### Editor Controls Overview
 
-Use the sliders, `<` and `>` buttons, dropdowns, and **ID:** fields to change the different parts of your cat!
+Use the sliders, `<` and `>` buttons, dropdowns, and clickable **ID:** button fields to change the different parts of your cat!
 
 ### Editor Buttons
 
@@ -63,13 +63,15 @@ Catstructor is recommended for use with the [Custom Stray Framework](https://www
 
 ### Custom Palette Support
 
-Catstructor is compatible with [MewPaletteExtender](https://www.nexusmods.com/mewgenics/mods/369).
+Catstructor is compatible with [MewPaletteExtender](https://www.nexusmods.com/mewgenics/mods/369). Please read [this tutorial](https://github.com/Pseudonym-Tim/mew-palette-extender#making-a-custom-palette-mod) explaining how you can add your own custom palettes.
 
-You can have them use a custom modded palette by clicking the "**ID:**" field next to **palette** and entering the palette's custom ID name, such as:
+You can have your cat use a custom modded palette by clicking the "**ID:**" field button next to **palette**, then typing in the palette's custom ID name, such as:
 
 ```text
 @myPalette
 ```
+
+You should then see that your cat updates to reflect the colors of your palette.
 
 Custom palette IDs are preserved when saving your cat or copying its `.gon` data.
 
