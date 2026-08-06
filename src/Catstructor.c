@@ -79,8 +79,12 @@ static void* g_screenshotUIRoot;
 static unsigned char g_screenshotUIRootFlags;
 static GLfloat g_screenshotPreviousClearColor[4];
 static PatchBackup g_screenshotClearColorPatch;
+static POINT g_screenshotCursorPosition;
+static int g_screenshotCursorPositionSaved;
 fn_gl_clear_color g_screenshotOriginalClearColor;
-uint8_t* g_screenshotBlackFrame;
+uint8_t* g_screenshotVisibleBlackFrame;
+uint8_t* g_screenshotVisibleWhiteFrame;
+uint8_t* g_screenshotBackgroundBlackFrame;
 int g_screenshotFrameWidth;
 int g_screenshotFrameHeight;
 static ScreenshotFrozenClip g_screenshotFrozenClips[SCREENSHOT_FROZEN_CLIP_CAPACITY];
@@ -1019,13 +1023,13 @@ static void APIENTRY HookScreenshotClearColor(GLfloat red, GLfloat green, GLfloa
         return;
     }
 
-    if (g_screenshotState == SCREENSHOT_STATE_WAIT_BLACK_FRONT)
+    if (g_screenshotState == SCREENSHOT_STATE_WAIT_VISIBLE_BLACK_FRAME || g_screenshotState == SCREENSHOT_STATE_WAIT_BACKGROUND_BLACK_FRAME)
     {
         original(0.0f, 0.0f, 0.0f, 1.0f);
         return;
     }
 
-    if (g_screenshotState == SCREENSHOT_STATE_WAIT_WHITE_FRONT)
+    if (g_screenshotState == SCREENSHOT_STATE_WAIT_VISIBLE_WHITE_FRAME || g_screenshotState == SCREENSHOT_STATE_WAIT_BACKGROUND_WHITE_FRAME)
     {
         original(1.0f, 1.0f, 1.0f, 1.0f);
         return;
@@ -1068,6 +1072,51 @@ static int InstallScreenshotClearColorOverride(void)
     return 1;
 }
 
+void ParkScreenshotCursor(void)
+{
+    HDC deviceContext;
+    HWND window;
+    RECT windowRect;
+    POINT parkedPosition;
+
+    if (!g_screenshotCursorPositionSaved)
+    {
+        if (!GetCursorPos(&g_screenshotCursorPosition))
+        {
+            return;
+        }
+
+        g_screenshotCursorPositionSaved = 1;
+    }
+
+    deviceContext = wglGetCurrentDC();
+    window = deviceContext ? WindowFromDC(deviceContext) : NULL;
+
+    if (window && GetWindowRect(window, &windowRect))
+    {
+        parkedPosition.x = windowRect.right + 32;
+        parkedPosition.y = windowRect.bottom + 32;
+    }
+    else
+    {
+        parkedPosition.x = -32000;
+        parkedPosition.y = -32000;
+    }
+
+    SetCursorPos(parkedPosition.x, parkedPosition.y);
+}
+
+static void RestoreScreenshotCursor(void)
+{
+    if (!g_screenshotCursorPositionSaved)
+    {
+        return;
+    }
+
+    SetCursorPos(g_screenshotCursorPosition.x, g_screenshotCursorPosition.y);
+    g_screenshotCursorPositionSaved = 0;
+}
+
 void RestoreScreenshotRenderState(void)
 {
     g_screenshotState = SCREENSHOT_STATE_IDLE;
@@ -1078,6 +1127,7 @@ void RestoreScreenshotRenderState(void)
     }
 
     RestoreScreenshotCatAnimations();
+    RestoreScreenshotCursor();
 
     if (g_screenshotOriginalClearColor)
     {
@@ -1087,8 +1137,12 @@ void RestoreScreenshotRenderState(void)
     RestorePatch(&g_screenshotClearColorPatch);
     g_screenshotOriginalClearColor = NULL;
 
-    free(g_screenshotBlackFrame);
-    g_screenshotBlackFrame = NULL;
+    free(g_screenshotVisibleBlackFrame);
+    free(g_screenshotVisibleWhiteFrame);
+    free(g_screenshotBackgroundBlackFrame);
+    g_screenshotVisibleBlackFrame = NULL;
+    g_screenshotVisibleWhiteFrame = NULL;
+    g_screenshotBackgroundBlackFrame = NULL;
     g_screenshotFrameWidth = 0;
     g_screenshotFrameHeight = 0;
     g_screenshotWaitFrames = 0;
@@ -1143,26 +1197,28 @@ int BeginNativeAlphaScreenshot(void)
     g_screenshotUIRootFlags = *renderFlags;
 
     /* CatAppearanceUI owns the stage artwork, while the CatVisual is drawn by
-    * the scene separately. Hide only this UI root. The renderer's imported
-    * glClearColor call is temporarily overridden so two otherwise identical
-    * cat frames get produced over solid black and solid white. Their RGB
-    * difference reconstructs exact coverage even when the window framebuffer has no alpha channel!
+    * the scene separately. Hide this UI root, then capture visible and cat-hidden
+    * black/white pairs. The second pair cancels full-screen post-processing and
+    * other stable rendering that cannot be disabled through this display root...
     */
     *renderFlags = (unsigned char)(*renderFlags & (unsigned char)~DISPLAY_OBJECT_ACTIVE_MASK);
 
-    g_screenshotState = SCREENSHOT_STATE_WAIT_BLACK_FRONT;
+    SetScreenshotCatVisible(1);
+    ParkScreenshotCursor();
+    g_screenshotState = SCREENSHOT_STATE_WAIT_VISIBLE_BLACK_FRAME;
     g_screenshotWaitFrames = 0;
     g_screenshotOriginalClearColor(0.0f, 0.0f, 0.0f, 1.0f);
-    //AddDebugMessage("Capturing black and white cat passes for transparent PNG!");
+    //AddDebugMessage("Capturing isolated visible/background passes for transparent PNG!");
     return 1;
 }
 
 static void FreezeScreenshotMovieClip(void* movieClip)
 {
+    unsigned char* renderFlags;
     unsigned char* stateFlags;
     int index;
 
-    if (!movieClip || !IsReadableMemoryRange((uint8_t*)movieClip + MOVIECLIP_CURRENT_FRAME_OFFSET, sizeof(int)) || !IsReadableMemoryRange((uint8_t*)movieClip + MOVIECLIP_STATE_FLAGS_OFFSET, sizeof(unsigned char)))
+    if (!movieClip || !IsReadableMemoryRange((uint8_t*)movieClip + MOVIECLIP_CURRENT_FRAME_OFFSET, sizeof(int)) || !IsReadableMemoryRange((uint8_t*)movieClip + DISPLAY_OBJECT_RENDER_FLAGS_OFFSET, sizeof(unsigned char)) || !IsReadableMemoryRange((uint8_t*)movieClip + MOVIECLIP_STATE_FLAGS_OFFSET, sizeof(unsigned char)))
     {
         return;
     }
@@ -1180,9 +1236,11 @@ static void FreezeScreenshotMovieClip(void* movieClip)
         return;
     }
 
+    renderFlags = (unsigned char*)movieClip + DISPLAY_OBJECT_RENDER_FLAGS_OFFSET;
     stateFlags = (unsigned char*)movieClip + MOVIECLIP_STATE_FLAGS_OFFSET;
     g_screenshotFrozenClips[g_screenshotFrozenClipCount].movieClip = movieClip;
     g_screenshotFrozenClips[g_screenshotFrozenClipCount].currentFrame = *(const int*)((uint8_t*)movieClip + MOVIECLIP_CURRENT_FRAME_OFFSET);
+    g_screenshotFrozenClips[g_screenshotFrozenClipCount].renderFlags = *renderFlags;
     g_screenshotFrozenClips[g_screenshotFrozenClipCount].stateFlags = *stateFlags;
     ++g_screenshotFrozenClipCount;
     *stateFlags &= (unsigned char)~MOVIECLIP_PLAYING_FLAG;
@@ -1234,6 +1292,31 @@ static int FreezeScreenshotCatAnimations(void* scene)
     return g_screenshotFrozenClipCount > 0;
 }
 
+void SetScreenshotCatVisible(int visible)
+{
+    unsigned char* renderFlags;
+    int index;
+
+    for (index = 0; index < g_screenshotFrozenClipCount; ++index)
+    {
+        if (!g_screenshotFrozenClips[index].movieClip || !IsReadableMemoryRange((uint8_t*)g_screenshotFrozenClips[index].movieClip + DISPLAY_OBJECT_RENDER_FLAGS_OFFSET, sizeof(unsigned char)))
+        {
+            continue;
+        }
+
+        renderFlags = (unsigned char*)g_screenshotFrozenClips[index].movieClip + DISPLAY_OBJECT_RENDER_FLAGS_OFFSET;
+
+        if (visible)
+        {
+            *renderFlags = g_screenshotFrozenClips[index].renderFlags;
+        }
+        else
+        {
+            *renderFlags = (unsigned char)(g_screenshotFrozenClips[index].renderFlags & (unsigned char)~DISPLAY_OBJECT_ACTIVE_MASK);
+        }
+    }
+}
+
 void PinScreenshotCatAnimations(void)
 {
     int index;
@@ -1251,17 +1334,20 @@ void PinScreenshotCatAnimations(void)
 
 static void RestoreScreenshotCatAnimations(void)
 {
+    unsigned char* renderFlags;
     unsigned char* stateFlags;
     int index;
 
     for (index = 0; index < g_screenshotFrozenClipCount; ++index)
     {
-        if (!g_screenshotFrozenClips[index].movieClip || !IsReadableMemoryRange((uint8_t*)g_screenshotFrozenClips[index].movieClip + MOVIECLIP_STATE_FLAGS_OFFSET, sizeof(unsigned char)))
+        if (!g_screenshotFrozenClips[index].movieClip || !IsReadableMemoryRange((uint8_t*)g_screenshotFrozenClips[index].movieClip + DISPLAY_OBJECT_RENDER_FLAGS_OFFSET, sizeof(unsigned char)) || !IsReadableMemoryRange((uint8_t*)g_screenshotFrozenClips[index].movieClip + MOVIECLIP_STATE_FLAGS_OFFSET, sizeof(unsigned char)))
         {
             continue;
         }
 
+        renderFlags = (unsigned char*)g_screenshotFrozenClips[index].movieClip + DISPLAY_OBJECT_RENDER_FLAGS_OFFSET;
         stateFlags = (unsigned char*)g_screenshotFrozenClips[index].movieClip + MOVIECLIP_STATE_FLAGS_OFFSET;
+        *renderFlags = g_screenshotFrozenClips[index].renderFlags;
         *stateFlags = g_screenshotFrozenClips[index].stateFlags;
     }
     

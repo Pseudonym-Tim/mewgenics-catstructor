@@ -1012,11 +1012,13 @@ static int WriteRgbaPng(const char* path, const uint8_t* pixels, int width, int 
     return success;
 }
 
-static int ReadScreenshotFrontFrame(uint8_t** outPixels, int* outWidth, int* outHeight)
+static int ReadScreenshotCurrentFrame(uint8_t** outPixels, int* outWidth, int* outHeight)
 {
+    GLboolean doubleBuffered;
     GLint viewport[4];
     GLint previousPackAlignment;
     GLint previousReadBuffer;
+    GLenum captureBuffer;
     uint8_t* pixels;
     size_t pixelCount;
     int width;
@@ -1063,10 +1065,19 @@ static int ReadScreenshotFrontFrame(uint8_t** outPixels, int* outWidth, int* out
         return 0;
     }
 
+    /* This hook runs after the scene has rendered but before the window swap...
+    * Read the current back buffer instead of GL_FRONT: Front-buffer contents
+    * can lag indefinitely under flip-model presentation, caused the white
+    * matte pass to keep seeing the preceding black frame on some systems I think...
+    */
+    doubleBuffered = GL_FALSE;
+    glGetBooleanv(GL_DOUBLEBUFFER, &doubleBuffered);
+    captureBuffer = doubleBuffered ? GL_BACK : GL_FRONT;
+
     glFinish();
     glGetIntegerv(GL_PACK_ALIGNMENT, &previousPackAlignment);
     glGetIntegerv(GL_READ_BUFFER, &previousReadBuffer);
-    glReadBuffer(GL_FRONT);
+    glReadBuffer(captureBuffer);
     glPixelStorei(GL_PACK_ALIGNMENT, 1);
     glReadPixels(viewport[0], viewport[1], width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
     glPixelStorei(GL_PACK_ALIGNMENT, previousPackAlignment);
@@ -1102,87 +1113,144 @@ static int ScreenshotMedian3(int first, int second, int third)
     return second;
 }
 
-static void ReadScreenshotBorderMode(const uint8_t* pixels, int width, int height, uint8_t color[3])
+static int ScreenshotFramesHaveDifferentMatte(const uint8_t* blackFrame, const uint8_t* whiteFrame, int width, int height)
 {
-    unsigned int histogram[3][256];
-    unsigned int bestCount;
-    int bestValue;
-    int channel;
-    int x;
-    int y;
+    size_t changedPixels;
+    size_t pixelCount;
+    size_t requiredPixels;
+    size_t index;
+    const uint8_t* blackPixel;
+    const uint8_t* whitePixel;
+    int redDifference;
+    int greenDifference;
+    int blueDifference;
+    int medianDifference;
 
-    memset(histogram, 0, sizeof(histogram));
-
-    for (x = 0; x < width; ++x)
+    if (!blackFrame || !whiteFrame || width <= 0 || height <= 0)
     {
-        for (channel = 0; channel < 3; ++channel)
-        {
-            ++histogram[channel][pixels[(size_t)x * 4U + (size_t)channel]];
-            ++histogram[channel][pixels[((size_t)(height - 1) * (size_t)width + (size_t)x) * 4U + (size_t)channel]];
-        }
+        return 0;
     }
 
-    for (y = 1; y + 1 < height; ++y)
+    pixelCount = (size_t)width * (size_t)height;
+    requiredPixels = pixelCount * SCREENSHOT_MINIMUM_MATTE_COVERAGE_PERCENT / 100U;
+
+    if (requiredPixels < SCREENSHOT_MINIMUM_COMPONENT_PIXELS)
     {
-        for (channel = 0; channel < 3; ++channel)
-        {
-            ++histogram[channel][pixels[(size_t)y * (size_t)width * 4U + (size_t)channel]];
-            ++histogram[channel][pixels[((size_t)y * (size_t)width + (size_t)(width - 1)) * 4U + (size_t)channel]];
-        }
+        requiredPixels = SCREENSHOT_MINIMUM_COMPONENT_PIXELS;
     }
 
-    for (channel = 0; channel < 3; ++channel)
-    {
-        bestCount = 0;
-        bestValue = 0;
+    changedPixels = 0;
 
-        for (x = 0; x < 256; ++x)
+    for (index = 0; index < pixelCount; ++index)
+    {
+        blackPixel = blackFrame + index * 4U;
+        whitePixel = whiteFrame + index * 4U;
+        redDifference = (int)whitePixel[0] - (int)blackPixel[0];
+        greenDifference = (int)whitePixel[1] - (int)blackPixel[1];
+        blueDifference = (int)whitePixel[2] - (int)blackPixel[2];
+        medianDifference = ScreenshotMedian3(redDifference, greenDifference, blueDifference);
+
+        if (medianDifference >= SCREENSHOT_MINIMUM_MATTE_DELTA)
         {
-            if (histogram[channel][x] > bestCount)
+            ++changedPixels;
+
+            if (changedPixels >= requiredPixels)
             {
-                bestCount = histogram[channel][x];
-                bestValue = x;
+                return 1;
             }
         }
-
-        color[channel] = (uint8_t)bestValue;
     }
+
+    return 0;
 }
 
-static uint8_t ReconstructScreenshotAlpha(const uint8_t* blackPixel, const uint8_t* whitePixel, const uint8_t blackBackground[3], const uint8_t whiteBackground[3])
+static int ScreenshotFrameDimensionsMatch(int width, int height)
 {
-    int backgroundWeight[3];
-    int denominator;
-    int difference;
+    if (width == g_screenshotFrameWidth && height == g_screenshotFrameHeight)
+    {
+        return 1;
+    }
+
+    AddDebugMessage("Screenshot failed: The viewport changed during capture!");
+    return 0;
+}
+
+static int ScreenshotRoundedDivide(int numerator, int denominator)
+{
+    if (denominator <= 0)
+    {
+        return 0;
+    }
+
+    if (numerator >= 0)
+    {
+        return (numerator + denominator / 2) / denominator;
+    }
+
+    return -((-numerator + denominator / 2) / denominator);
+}
+
+static uint8_t ReconstructIsolatedScreenshotAlpha(const uint8_t* visibleBlackPixel, const uint8_t* visibleWhitePixel, const uint8_t* backgroundBlackPixel, const uint8_t* backgroundWhitePixel)
+{
+    int channelAlpha[3];
+    int validChannels;
+    int backgroundRange;
+    int visibleRange;
+    int alpha;
     int channel;
-    int weight;
+
+    validChannels = 0;
 
     for (channel = 0; channel < 3; ++channel)
     {
-        denominator = (int)whiteBackground[channel] - (int)blackBackground[channel];
-        difference = (int)whitePixel[channel] - (int)blackPixel[channel];
+        backgroundRange = (int)backgroundWhitePixel[channel] - (int)backgroundBlackPixel[channel];
 
-        if (denominator <= 0)
+        if (backgroundRange < SCREENSHOT_MINIMUM_TRANSMISSION_RANGE)
         {
-            backgroundWeight[channel] = 0;
             continue;
         }
 
-        weight = (difference * 255 + denominator / 2) / denominator;
-        if (weight < 0) weight = 0;
-        if (weight > 255) weight = 255;
-        backgroundWeight[channel] = weight;
+        visibleRange = (int)visibleWhitePixel[channel] - (int)visibleBlackPixel[channel];
+
+        if (visibleRange < 0)
+        {
+            visibleRange = 0;
+        }
+
+        if (visibleRange > backgroundRange)
+        {
+            visibleRange = backgroundRange;
+        }
+
+        alpha = 255 - (visibleRange * 255 + backgroundRange / 2) / backgroundRange;
+
+        if (alpha < 0) alpha = 0;
+        if (alpha > 255) alpha = 255;
+        channelAlpha[validChannels++] = alpha;
     }
 
-    weight = ScreenshotMedian3(backgroundWeight[0], backgroundWeight[1], backgroundWeight[2]);
-    return (uint8_t)(255 - weight);
+    if (validChannels == 0)
+    {
+        return 0U;
+    }
+
+    if (validChannels == 1)
+    {
+        return (uint8_t)channelAlpha[0];
+    }
+
+    if (validChannels == 2)
+    {
+        return (uint8_t)((channelAlpha[0] + channelAlpha[1] + 1) / 2);
+    }
+
+    return (uint8_t)ScreenshotMedian3(channelAlpha[0], channelAlpha[1], channelAlpha[2]);
 }
 
-static uint8_t ReconstructScreenshotColorChannel(uint8_t blackValue, uint8_t whiteValue, uint8_t blackBackground, uint8_t whiteBackground, uint8_t alpha)
+static uint8_t ReconstructIsolatedScreenshotColorChannel(uint8_t visibleBlackValue, uint8_t visibleWhiteValue, uint8_t backgroundBlackValue, uint8_t backgroundWhiteValue, uint8_t alpha)
 {
-    int transparentWeight;
-    int blackNumerator;
-    int whiteNumerator;
+    int backgroundRange;
+    int denominator;
     int blackEstimate;
     int whiteEstimate;
     int value;
@@ -1192,253 +1260,24 @@ static uint8_t ReconstructScreenshotColorChannel(uint8_t blackValue, uint8_t whi
         return 0U;
     }
 
-    transparentWeight = 255 - (int)alpha;
-    blackNumerator = (int)blackValue * 255 - transparentWeight * (int)blackBackground;
-    whiteNumerator = (int)whiteValue * 255 - transparentWeight * (int)whiteBackground;
-    blackEstimate = (blackNumerator + (int)alpha / 2) / (int)alpha;
-    whiteEstimate = (whiteNumerator + (int)alpha / 2) / (int)alpha;
-    if (blackEstimate < 0) { blackEstimate = 0; }
-    if (blackEstimate > 255) { blackEstimate = 255; }
-    if (whiteEstimate < 0) { whiteEstimate = 0; }
-    if (whiteEstimate > 255) { whiteEstimate = 255; }
+    backgroundRange = (int)backgroundWhiteValue - (int)backgroundBlackValue;
+
+    if (backgroundRange < SCREENSHOT_MINIMUM_TRANSMISSION_RANGE)
+    {
+        return 0U;
+    }
+
+    denominator = backgroundRange * (int)alpha;
+    blackEstimate = ScreenshotRoundedDivide(((int)visibleBlackValue - (int)backgroundBlackValue) * 65025, denominator);
+    whiteEstimate = 255 + ScreenshotRoundedDivide(((int)visibleWhiteValue - (int)backgroundWhiteValue) * 65025, denominator);
+
+    if (blackEstimate < 0) blackEstimate = 0;
+    if (blackEstimate > 255) blackEstimate = 255;
+    if (whiteEstimate < 0) whiteEstimate = 0;
+    if (whiteEstimate > 255) whiteEstimate = 255;
+
     value = (blackEstimate + whiteEstimate + 1) / 2;
-
     return (uint8_t)value;
-}
-
-static size_t FilterScreenshotAlphaComponents(uint8_t* alphaMask, int width, int height, int* work)
-{
-    size_t removed;
-    int head;
-    int tail;
-    int pixelCount;
-    int index;
-    int x;
-    int y;
-    int current;
-    int next;
-    int neighbor;
-    int componentHead;
-    int componentTail;
-    int componentCount;
-    int largestHead;
-    int largestCount;
-
-    if (!alphaMask || !work || width <= 0 || height <= 0)
-    {
-        return 0;
-    }
-
-    head = 0;
-    tail = 0;
-    removed = 0;
-    pixelCount = width * height;
-
-    // First discard coverage connected to the true framebuffer border...
-    for (x = 0; x < width; ++x)
-    {
-        index = x;
-
-        if (alphaMask[index] != 0U)
-        {
-            alphaMask[index] = 0U;
-            work[tail++] = index;
-            ++removed;
-        }
-
-        index = (height - 1) * width + x;
-
-        if (height > 1 && alphaMask[index] != 0U)
-        {
-            alphaMask[index] = 0U;
-            work[tail++] = index;
-            ++removed;
-        }
-    }
-
-    for (y = 1; y + 1 < height; ++y)
-    {
-        index = y * width;
-
-        if (alphaMask[index] != 0U)
-        {
-            alphaMask[index] = 0U;
-            work[tail++] = index;
-            ++removed;
-        }
-
-        index = y * width + width - 1;
-
-        if (width > 1 && alphaMask[index] != 0U)
-        {
-            alphaMask[index] = 0U;
-            work[tail++] = index;
-            ++removed;
-        }
-    }
-
-    while (head < tail)
-    {
-        index = work[head++];
-        x = index % width;
-        y = index / width;
-
-        if (x > 0 && alphaMask[index - 1] != 0U)
-        {
-            alphaMask[index - 1] = 0U;
-            work[tail++] = index - 1;
-            ++removed;
-        }
-
-        if (x + 1 < width && alphaMask[index + 1] != 0U)
-        {
-            alphaMask[index + 1] = 0U;
-            work[tail++] = index + 1;
-            ++removed;
-        }
-
-        if (y > 0 && alphaMask[index - width] != 0U)
-        {
-            alphaMask[index - width] = 0U;
-            work[tail++] = index - width;
-            ++removed;
-        }
-
-        if (y + 1 < height && alphaMask[index + width] != 0U)
-        {
-            alphaMask[index + width] = 0U;
-            work[tail++] = index + width;
-            ++removed;
-        }
-    }
-
-    /* 
-    * Reuse work as a per-pixel linked-list and visited map. Zero means the
-    * pixel is unvisited, -1 ends a component list, and positive values store
-    * the next pixel index plus one. (This preserves original alpha values)...
-    */
-    for (index = 0; index < pixelCount; ++index)
-    {
-        work[index] = 0;
-    }
-
-    largestHead = -1;
-    largestCount = 0;
-
-    for (index = 0; index < pixelCount; ++index)
-    {
-        if (alphaMask[index] == 0U || work[index] != 0)
-        {
-            continue;
-        }
-
-        componentHead = index;
-        componentTail = index;
-        componentCount = 0;
-        work[index] = -1;
-        current = componentHead;
-
-        while (current >= 0)
-        {
-            ++componentCount;
-            x = current % width;
-            y = current / width;
-
-            if (x > 0)
-            {
-                neighbor = current - 1;
-
-                if (alphaMask[neighbor] != 0U && work[neighbor] == 0)
-                {
-                    work[neighbor] = -1;
-                    work[componentTail] = neighbor + 1;
-                    componentTail = neighbor;
-                }
-            }
-
-            if (x + 1 < width)
-            {
-                neighbor = current + 1;
-
-                if (alphaMask[neighbor] != 0U && work[neighbor] == 0)
-                {
-                    work[neighbor] = -1;
-                    work[componentTail] = neighbor + 1;
-                    componentTail = neighbor;
-                }
-            }
-
-            if (y > 0)
-            {
-                neighbor = current - width;
-
-                if (alphaMask[neighbor] != 0U && work[neighbor] == 0)
-                {
-                    work[neighbor] = -1;
-                    work[componentTail] = neighbor + 1;
-                    componentTail = neighbor;
-                }
-            }
-
-            if (y + 1 < height)
-            {
-                neighbor = current + width;
-
-                if (alphaMask[neighbor] != 0U && work[neighbor] == 0)
-                {
-                    work[neighbor] = -1;
-                    work[componentTail] = neighbor + 1;
-                    componentTail = neighbor;
-                }
-            }
-
-            next = work[current];
-            current = next < 0 ? -1 : next - 1;
-        }
-
-        if (componentCount > largestCount)
-        {
-            if (largestHead >= 0)
-            {
-                current = largestHead;
-
-                while (current >= 0)
-                {
-                    next = work[current];
-
-                    if (alphaMask[current] != 0U)
-                    {
-                        alphaMask[current] = 0U;
-                        ++removed;
-                    }
-
-                    current = next < 0 ? -1 : next - 1;
-                }
-            }
-
-            largestHead = componentHead;
-            largestCount = componentCount;
-        }
-        else
-        {
-            current = componentHead;
-
-            while (current >= 0)
-            {
-                next = work[current];
-
-                if (alphaMask[current] != 0U)
-                {
-                    alphaMask[current] = 0U;
-                    ++removed;
-                }
-
-                current = next < 0 ? -1 : next - 1;
-            }
-        }
-    }
-
-    return removed;
 }
 
 int CaptureScreenshotBlackPass(void)
@@ -1451,29 +1290,98 @@ int CaptureScreenshotBlackPass(void)
     width = 0;
     height = 0;
 
-    if (!ReadScreenshotFrontFrame(&pixels, &width, &height))
+    if (!ReadScreenshotCurrentFrame(&pixels, &width, &height))
     {
+        return -1;
+    }
+
+    free(g_screenshotVisibleBlackFrame);
+    g_screenshotVisibleBlackFrame = pixels;
+    g_screenshotFrameWidth = width;
+    g_screenshotFrameHeight = height;
+    return 1;
+}
+
+int CaptureScreenshotWhitePass(void)
+{
+    uint8_t* pixels;
+    int width;
+    int height;
+
+    if (!g_screenshotVisibleBlackFrame || g_screenshotFrameWidth <= 0 || g_screenshotFrameHeight <= 0)
+    {
+        AddDebugMessage("Screenshot failed: The visible black pass was not captured!");
+        return -1;
+    }
+
+    pixels = NULL;
+    width = 0;
+    height = 0;
+
+    if (!ReadScreenshotCurrentFrame(&pixels, &width, &height))
+    {
+        return -1;
+    }
+
+    if (!ScreenshotFrameDimensionsMatch(width, height))
+    {
+        free(pixels);
+        return -1;
+    }
+
+    if (!ScreenshotFramesHaveDifferentMatte(g_screenshotVisibleBlackFrame, pixels, width, height))
+    {
+        free(pixels);
         return 0;
     }
 
-    free(g_screenshotBlackFrame);
-    g_screenshotBlackFrame = pixels;
-    g_screenshotFrameWidth = width;
-    g_screenshotFrameHeight = height;
+    free(g_screenshotVisibleWhiteFrame);
+    g_screenshotVisibleWhiteFrame = pixels;
+    return 1;
+}
+
+int CaptureScreenshotBackgroundBlackPass(void)
+{
+    uint8_t* pixels;
+    int width;
+    int height;
+
+    if (!g_screenshotVisibleBlackFrame || !g_screenshotVisibleWhiteFrame || g_screenshotFrameWidth <= 0 || g_screenshotFrameHeight <= 0)
+    {
+        AddDebugMessage("Screenshot failed: The visible render passes were not captured!");
+        return -1;
+    }
+
+    pixels = NULL;
+    width = 0;
+    height = 0;
+
+    if (!ReadScreenshotCurrentFrame(&pixels, &width, &height))
+    {
+        return -1;
+    }
+
+    if (!ScreenshotFrameDimensionsMatch(width, height))
+    {
+        free(pixels);
+        return -1;
+    }
+
+    free(g_screenshotBackgroundBlackFrame);
+    g_screenshotBackgroundBlackFrame = pixels;
     return 1;
 }
 
 int CaptureCatScreenshot(void)
 {
     SYSTEMTIME now;
-    uint8_t blackBackground[3];
-    uint8_t whiteBackground[3];
-    uint8_t* whiteFrame;
+    uint8_t* backgroundWhiteFrame;
     uint8_t* alphaMask;
     uint8_t* output;
-    int* borderQueue;
-    const uint8_t* blackPixel;
-    const uint8_t* whitePixel;
+    const uint8_t* visibleBlackPixel;
+    const uint8_t* visibleWhitePixel;
+    const uint8_t* backgroundBlackPixel;
+    const uint8_t* backgroundWhitePixel;
     uint8_t* outputPixel;
     char directory[MAX_PATH + 32];
     char outputPath[800];
@@ -1481,12 +1389,10 @@ int CaptureCatScreenshot(void)
     size_t index;
     size_t sourceIndex;
     size_t outputIndex;
-    size_t removedBorderPixels;
     int width;
     int height;
     int x;
     int y;
-    int channel;
     int left;
     int bottom;
     int right;
@@ -1501,59 +1407,47 @@ int CaptureCatScreenshot(void)
     int success;
     uint8_t alpha;
 
-    if (!g_screenshotBlackFrame || g_screenshotFrameWidth <= 0 || g_screenshotFrameHeight <= 0)
+    if (!g_screenshotVisibleBlackFrame || !g_screenshotVisibleWhiteFrame || !g_screenshotBackgroundBlackFrame || g_screenshotFrameWidth <= 0 || g_screenshotFrameHeight <= 0)
     {
-        AddDebugMessage("Screenshot failed: The black render pass was not captured!");
+        AddDebugMessage("Screenshot failed: The required isolation passes were not captured!");
+        return -1;
+    }
+
+    backgroundWhiteFrame = NULL;
+    width = 0;
+    height = 0;
+
+    if (!ReadScreenshotCurrentFrame(&backgroundWhiteFrame, &width, &height))
+    {
+        return -1;
+    }
+
+    if (!ScreenshotFrameDimensionsMatch(width, height))
+    {
+        free(backgroundWhiteFrame);
+        return -1;
+    }
+
+    if (!ScreenshotFramesHaveDifferentMatte(g_screenshotBackgroundBlackFrame, backgroundWhiteFrame, width, height))
+    {
+        free(backgroundWhiteFrame);
         return 0;
     }
 
     if (!EnsureScreenshotDirectory(directory, sizeof(directory)))
     {
-        return 0;
-    }
-
-    whiteFrame = NULL;
-    width = 0;
-    height = 0;
-
-    if (!ReadScreenshotFrontFrame(&whiteFrame, &width, &height))
-    {
-        return 0;
-    }
-
-    if (width != g_screenshotFrameWidth || height != g_screenshotFrameHeight)
-    {
-        free(whiteFrame);
-        AddDebugMessage("Screenshot failed: The viewport changed during capture!");
-        return 0;
+        free(backgroundWhiteFrame);
+        return -1;
     }
 
     pixelCount = (size_t)width * (size_t)height;
     alphaMask = (uint8_t*)malloc(pixelCount);
-    borderQueue = (int*)malloc(pixelCount * sizeof(int));
 
-    if (!alphaMask || !borderQueue)
+    if (!alphaMask)
     {
-        free(borderQueue);
-        free(alphaMask);
-        free(whiteFrame);
+        free(backgroundWhiteFrame);
         AddDebugMessage("Screenshot failed: Not enough memory for alpha reconstruction!");
-        return 0;
-    }
-
-    ReadScreenshotBorderMode(g_screenshotBlackFrame, width, height, blackBackground);
-    ReadScreenshotBorderMode(whiteFrame, width, height, whiteBackground);
-
-    for (channel = 0; channel < 3; ++channel)
-    {
-        if ((int)whiteBackground[channel] - (int)blackBackground[channel] < SCREENSHOT_MINIMUM_BACKGROUND_RANGE)
-        {
-            free(borderQueue);
-            free(alphaMask);
-            free(whiteFrame);
-            AddDebugMessage("Screenshot failed: The controlled black/white background passes were not applied!");
-            return 0;
-        }
+        return -1;
     }
 
     for (y = 0; y < height; ++y)
@@ -1561,9 +1455,11 @@ int CaptureCatScreenshot(void)
         for (x = 0; x < width; ++x)
         {
             index = (size_t)y * (size_t)width + (size_t)x;
-            blackPixel = g_screenshotBlackFrame + index * 4U;
-            whitePixel = whiteFrame + index * 4U;
-            alpha = ReconstructScreenshotAlpha(blackPixel, whitePixel, blackBackground, whiteBackground);
+            visibleBlackPixel = g_screenshotVisibleBlackFrame + index * 4U;
+            visibleWhitePixel = g_screenshotVisibleWhiteFrame + index * 4U;
+            backgroundBlackPixel = g_screenshotBackgroundBlackFrame + index * 4U;
+            backgroundWhitePixel = backgroundWhiteFrame + index * 4U;
+            alpha = ReconstructIsolatedScreenshotAlpha(visibleBlackPixel, visibleWhitePixel, backgroundBlackPixel, backgroundWhitePixel);
 
             if (alpha <= SCREENSHOT_ALPHA_THRESHOLD)
             {
@@ -1573,9 +1469,6 @@ int CaptureCatScreenshot(void)
             alphaMask[index] = alpha;
         }
     }
-
-    // Remove edge-connected render noise, then keep the largest remaining alpha component...
-    removedBorderPixels = FilterScreenshotAlphaComponents(alphaMask, width, height, borderQueue);
 
     left = width;
     bottom = height;
@@ -1595,7 +1488,7 @@ int CaptureCatScreenshot(void)
             }
 
             ++area;
-            
+
             if (x < left) left = x;
             if (x > right) right = x;
             if (y < bottom) bottom = y;
@@ -1605,11 +1498,10 @@ int CaptureCatScreenshot(void)
 
     if (area < SCREENSHOT_MINIMUM_COMPONENT_PIXELS || right < left || top < bottom)
     {
-        free(borderQueue);
         free(alphaMask);
-        free(whiteFrame);
-        AddDebugMessage("Screenshot failed: Cat pixels were not found after component filtering!");
-        return 0;
+        free(backgroundWhiteFrame);
+        AddDebugMessage("Screenshot failed: Cat pixels were not found after background isolation!");
+        return -1;
     }
 
     left -= SCREENSHOT_PADDING;
@@ -1628,11 +1520,10 @@ int CaptureCatScreenshot(void)
 
     if (!output)
     {
-        free(borderQueue);
         free(alphaMask);
-        free(whiteFrame);
+        free(backgroundWhiteFrame);
         AddDebugMessage("Screenshot failed: Not enough memory for PNG!");
-        return 0;
+        return -1;
     }
 
     for (outputY = 0; outputY < outputHeight; ++outputY)
@@ -1650,13 +1541,15 @@ int CaptureCatScreenshot(void)
                 continue;
             }
 
-            blackPixel = g_screenshotBlackFrame + sourceIndex * 4U;
-            whitePixel = whiteFrame + sourceIndex * 4U;
+            visibleBlackPixel = g_screenshotVisibleBlackFrame + sourceIndex * 4U;
+            visibleWhitePixel = g_screenshotVisibleWhiteFrame + sourceIndex * 4U;
+            backgroundBlackPixel = g_screenshotBackgroundBlackFrame + sourceIndex * 4U;
+            backgroundWhitePixel = backgroundWhiteFrame + sourceIndex * 4U;
             outputIndex = ((size_t)outputY * (size_t)outputWidth + (size_t)outputX) * 4U;
             outputPixel = output + outputIndex;
-            outputPixel[0] = ReconstructScreenshotColorChannel(blackPixel[0], whitePixel[0], blackBackground[0], whiteBackground[0], alpha);
-            outputPixel[1] = ReconstructScreenshotColorChannel(blackPixel[1], whitePixel[1], blackBackground[1], whiteBackground[1], alpha);
-            outputPixel[2] = ReconstructScreenshotColorChannel(blackPixel[2], whitePixel[2], blackBackground[2], whiteBackground[2], alpha);
+            outputPixel[0] = ReconstructIsolatedScreenshotColorChannel(visibleBlackPixel[0], visibleWhitePixel[0], backgroundBlackPixel[0], backgroundWhitePixel[0], alpha);
+            outputPixel[1] = ReconstructIsolatedScreenshotColorChannel(visibleBlackPixel[1], visibleWhitePixel[1], backgroundBlackPixel[1], backgroundWhitePixel[1], alpha);
+            outputPixel[2] = ReconstructIsolatedScreenshotColorChannel(visibleBlackPixel[2], visibleWhitePixel[2], backgroundBlackPixel[2], backgroundWhitePixel[2], alpha);
             outputPixel[3] = alpha;
         }
     }
@@ -1665,18 +1558,17 @@ int CaptureCatScreenshot(void)
     snprintf(outputPath, sizeof(outputPath), "%s\\cat_%04u%02u%02u-%02u%02u%02u-%03u.png", directory, (unsigned int)now.wYear, (unsigned int)now.wMonth, (unsigned int)now.wDay, (unsigned int)now.wHour, (unsigned int)now.wMinute, (unsigned int)now.wSecond, (unsigned int)now.wMilliseconds);
     success = WriteRgbaPng(outputPath, output, outputWidth, outputHeight);
     free(output);
-    free(borderQueue);
     free(alphaMask);
-    free(whiteFrame);
+    free(backgroundWhiteFrame);
 
     if (!success)
     {
         AddDebugMessage("Screenshot failed while writing the PNG file!");
-        return 0;
+        return -1;
     }
 
     AddDebugMessage("Saved cat .png: %s", AppearanceFileName(outputPath));
-    Log("Captured pinned-pose black/white alpha reconstruction to %s (%dx%d, removed %llu edge pixels)!", outputPath, outputWidth, outputHeight, (unsigned long long)removedBorderPixels);
+    Log("Captured four-pass isolated cat PNG to %s (%dx%d); scene vignette, UI, and cursor were excluded!", outputPath, outputWidth, outputHeight);
     return 1;
 }
 

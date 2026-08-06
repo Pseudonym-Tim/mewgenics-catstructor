@@ -1780,7 +1780,7 @@ void ApplyAppearance(uint8_t* parts, const AppearanceSnapshot* appearance)
 
     *(int*)(parts + CATPART_ARM1_CLAWS_OFFSET) = claws;
     *(int*)(parts + CATPART_ARM2_CLAWS_OFFSET) = claws;
-    *(int*)(parts + CATPART_PALETTE_OFFSET) = ClampAppearanceID(appearance->palette, 1);
+    *(int*)(parts + CATPART_PALETTE_OFFSET) = ClampAppearanceID(appearance->palette, 0);
     *(int*)(parts + CATPART_BODY_ID_OFFSET) = ClampAppearanceID(appearance->body, 1);
     *(int*)(parts + CATPART_HEAD_ID_OFFSET) = ClampAppearanceID(appearance->head, 1);
     *(int*)(parts + CATPART_TAIL_ID_OFFSET) = ClampAppearanceID(appearance->tail, 1);
@@ -1825,32 +1825,106 @@ void HookSceneDraw(void* scene)
 
     if (g_screenshotState != SCREENSHOT_STATE_IDLE)
     {
-        /* 
-        * Seek every captured MovieClip back to the exact frame recorded when the button was pressed,
-        * then rebuild its display list so both matte passes render the same pose...
+        /*
+        * Keep the exact pose and mouse position stable for every pass. The
+        * background passes disable only the cat clips, everything else is
+        * captured again and cancelled mathematically from the final PNG...
         */
         PinScreenshotCatAnimations();
+        ParkScreenshotCursor();
+
+        if (g_screenshotState == SCREENSHOT_STATE_WAIT_BACKGROUND_BLACK_FRAME || g_screenshotState == SCREENSHOT_STATE_WAIT_BACKGROUND_WHITE_FRAME)
+        {
+            SetScreenshotCatVisible(0);
+        }
+        else
+        {
+            SetScreenshotCatVisible(1);
+        }
     }
 
-    /* GL_FRONT still contains the preceding frame while this ImGui callback
-    * runs. Wait for completed swap for each controlled background pass.
-    * The cat's MovieClips remain paused until both frames have been read, so
-    * black/white subtraction reconstructs alpha without animation ghosting...
+    /*
+    * This callback runs after the scene draw and before presentation. Capture
+    * the cat over black and white, then repeat both mattes with the cat hidden...
+    * Comparing the visible pair to the background pair removes post-process
+    * vignette, software cursor, and any other stable full-screen rendering...
     */
-    if (g_screenshotState == SCREENSHOT_STATE_WAIT_BLACK_FRONT)
+    if (g_screenshotState == SCREENSHOT_STATE_WAIT_VISIBLE_BLACK_FRAME)
     {
+        int captureStatus;
+
         ++g_screenshotWaitFrames;
 
-        if (g_screenshotWaitFrames >= SCREENSHOT_FRONT_WAIT_FRAMES)
+        if (g_screenshotWaitFrames >= SCREENSHOT_PASS_WAIT_FRAMES)
         {
-            if (!CaptureScreenshotBlackPass())
+            captureStatus = CaptureScreenshotBlackPass();
+
+            if (captureStatus < 0)
             {
                 RestoreScreenshotRenderState();
                 return;
             }
 
-            g_screenshotState = SCREENSHOT_STATE_WAIT_WHITE_FRONT;
-            g_screenshotWaitFrames = 0;
+            if (captureStatus > 0)
+            {
+                g_screenshotState = SCREENSHOT_STATE_WAIT_VISIBLE_WHITE_FRAME;
+                g_screenshotWaitFrames = 0;
+
+                if (g_screenshotOriginalClearColor)
+                {
+                    g_screenshotOriginalClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+                }
+
+                return;
+            }
+
+            if (g_screenshotWaitFrames >= SCREENSHOT_MAX_WAIT_FRAMES)
+            {
+                AddDebugMessage("Screenshot failed: Timed out waiting for the visible black pass!");
+                RestoreScreenshotRenderState();
+                return;
+            }
+        }
+
+        return;
+    }
+
+    if (g_screenshotState == SCREENSHOT_STATE_WAIT_VISIBLE_WHITE_FRAME)
+    {
+        int captureStatus;
+
+        ++g_screenshotWaitFrames;
+
+        if (g_screenshotWaitFrames >= SCREENSHOT_PASS_WAIT_FRAMES)
+        {
+            captureStatus = CaptureScreenshotWhitePass();
+
+            if (captureStatus < 0)
+            {
+                RestoreScreenshotRenderState();
+                return;
+            }
+
+            if (captureStatus > 0)
+            {
+                SetScreenshotCatVisible(0);
+                g_screenshotState = SCREENSHOT_STATE_WAIT_BACKGROUND_BLACK_FRAME;
+                g_screenshotWaitFrames = 0;
+
+                if (g_screenshotOriginalClearColor)
+                {
+                    g_screenshotOriginalClearColor(0.0f, 0.0f, 0.0f, 1.0f);
+                }
+
+                return;
+            }
+
+            if (g_screenshotWaitFrames >= SCREENSHOT_MAX_WAIT_FRAMES)
+            {
+                AddDebugMessage("Screenshot failed: Timed out waiting for the visible white pass!");
+                RestoreScreenshotRenderState();
+                return;
+            }
 
             if (g_screenshotOriginalClearColor)
             {
@@ -1861,14 +1935,73 @@ void HookSceneDraw(void* scene)
         return;
     }
 
-    if (g_screenshotState == SCREENSHOT_STATE_WAIT_WHITE_FRONT)
+    if (g_screenshotState == SCREENSHOT_STATE_WAIT_BACKGROUND_BLACK_FRAME)
     {
+        int captureStatus;
+
         ++g_screenshotWaitFrames;
 
-        if (g_screenshotWaitFrames >= SCREENSHOT_FRONT_WAIT_FRAMES)
+        if (g_screenshotWaitFrames >= SCREENSHOT_PASS_WAIT_FRAMES)
         {
-            CaptureCatScreenshot();
-            RestoreScreenshotRenderState();
+            captureStatus = CaptureScreenshotBackgroundBlackPass();
+
+            if (captureStatus < 0)
+            {
+                RestoreScreenshotRenderState();
+                return;
+            }
+
+            if (captureStatus > 0)
+            {
+                g_screenshotState = SCREENSHOT_STATE_WAIT_BACKGROUND_WHITE_FRAME;
+                g_screenshotWaitFrames = 0;
+
+                if (g_screenshotOriginalClearColor)
+                {
+                    g_screenshotOriginalClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+                }
+
+                return;
+            }
+
+            if (g_screenshotWaitFrames >= SCREENSHOT_MAX_WAIT_FRAMES)
+            {
+                AddDebugMessage("Screenshot failed: Timed out waiting for the background black pass!");
+                RestoreScreenshotRenderState();
+                return;
+            }
+        }
+
+        return;
+    }
+
+    if (g_screenshotState == SCREENSHOT_STATE_WAIT_BACKGROUND_WHITE_FRAME)
+    {
+        int captureStatus;
+
+        ++g_screenshotWaitFrames;
+
+        if (g_screenshotWaitFrames >= SCREENSHOT_PASS_WAIT_FRAMES)
+        {
+            captureStatus = CaptureCatScreenshot();
+
+            if (captureStatus != 0)
+            {
+                RestoreScreenshotRenderState();
+                return;
+            }
+
+            if (g_screenshotWaitFrames >= SCREENSHOT_MAX_WAIT_FRAMES)
+            {
+                AddDebugMessage("Screenshot failed: Timed out waiting for the background white pass!");
+                RestoreScreenshotRenderState();
+                return;
+            }
+
+            if (g_screenshotOriginalClearColor)
+            {
+                g_screenshotOriginalClearColor(1.0f, 1.0f, 1.0f, 1.0f);
+            }
         }
 
         return;
@@ -1935,7 +2068,7 @@ void HookSceneDraw(void* scene)
                 changed = 1;
             }
 
-            changed |= PaletteControl("palette", (int*)(parts + CATPART_PALETTE_OFFSET), 1);
+            changed |= PaletteControl("palette", (int*)(parts + CATPART_PALETTE_OFFSET), 0);
             AdjustSectionIndent(-DEBUG_SECTION_INDENT);
         }
 

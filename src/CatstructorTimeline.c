@@ -1301,6 +1301,15 @@ int RuntimePaletteInfoIsReady(void)
 
 static int RuntimePaletteRowIsBlank(int row)
 {
+    /*
+    * (Palette slot zero is a real game palette)... 
+    * Keep it selectable even when its source row happens to look like one of the blank-row sentinels...
+    */
+    if (row == 0)
+    {
+        return 0;
+    }
+
     if (!RuntimePaletteInfoIsReady() || row < 0 || row >= g_paletteHeight)
     {
         return 0;

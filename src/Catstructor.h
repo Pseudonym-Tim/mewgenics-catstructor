@@ -231,12 +231,17 @@
 #define VOICE_PITCH_DEFAULT 1.0
 #define APPEARANCE_DEFAULT_FRAME 1000
 #define SCREENSHOT_STATE_IDLE 0
-#define SCREENSHOT_STATE_WAIT_BLACK_FRONT 1
-#define SCREENSHOT_STATE_WAIT_WHITE_FRONT 2
+#define SCREENSHOT_STATE_WAIT_VISIBLE_BLACK_FRAME 1
+#define SCREENSHOT_STATE_WAIT_VISIBLE_WHITE_FRAME 2
+#define SCREENSHOT_STATE_WAIT_BACKGROUND_BLACK_FRAME 3
+#define SCREENSHOT_STATE_WAIT_BACKGROUND_WHITE_FRAME 4
 #define SCREENSHOT_ALPHA_THRESHOLD 2
-#define SCREENSHOT_FRONT_WAIT_FRAMES 2
+#define SCREENSHOT_PASS_WAIT_FRAMES 2
+#define SCREENSHOT_MAX_WAIT_FRAMES 300
 #define SCREENSHOT_FROZEN_CLIP_CAPACITY 256
-#define SCREENSHOT_MINIMUM_BACKGROUND_RANGE 128
+#define SCREENSHOT_MINIMUM_MATTE_DELTA 24
+#define SCREENSHOT_MINIMUM_MATTE_COVERAGE_PERCENT 5
+#define SCREENSHOT_MINIMUM_TRANSMISSION_RANGE 4
 #define SCREENSHOT_MINIMUM_COMPONENT_PIXELS 64
 #define SCREENSHOT_PADDING 8
 #define SCREENSHOT_MAX_DIMENSION 8192
@@ -365,6 +370,7 @@ typedef struct ScreenshotFrozenClip
 {
     void* movieClip;
     int currentFrame;
+    unsigned char renderFlags;
     unsigned char stateFlags;
 } ScreenshotFrozenClip;
 
@@ -526,7 +532,9 @@ extern float g_sliderNavigationHeight;
 extern int g_screenshotState;
 extern int g_screenshotWaitFrames;
 extern fn_gl_clear_color g_screenshotOriginalClearColor;
-extern uint8_t* g_screenshotBlackFrame;
+extern uint8_t* g_screenshotVisibleBlackFrame;
+extern uint8_t* g_screenshotVisibleWhiteFrame;
+extern uint8_t* g_screenshotBackgroundBlackFrame;
 extern int g_screenshotFrameWidth;
 extern int g_screenshotFrameHeight;
 extern char g_debugMessages[DEBUG_LOG_CAPACITY][DEBUG_LOG_MESSAGE_LENGTH];
@@ -541,7 +549,9 @@ void ApplyPaletteMaterial(void* catVisual, const uint8_t* parts);
 int BeginNativeAlphaScreenshot(void);
 int BuildCustomCatPresetCache(void);
 int CaptureCatScreenshot(void);
+int CaptureScreenshotBackgroundBlackPass(void);
 int CaptureScreenshotBlackPass(void);
+int CaptureScreenshotWhitePass(void);
 int ClampAppearanceID(int value, int minimum);
 double ClampVoicePitch(double value);
 void ClearNamedAppearanceIDs(void);
@@ -574,10 +584,12 @@ void InitMsvcString(MsvcString* value, const char* text);
 int IsReadableMemoryRange(const void* address, size_t length);
 void Log(const char* format, ...);
 const char* NamedKindForField(AppearanceField field);
+void ParkScreenshotCursor(void);
 void PinScreenshotCatAnimations(void);
 void ReadAppearance(const uint8_t* parts, AppearanceSnapshot* appearance);
 int ResolveNamedAppearanceID(AppearanceField field, const char* token, int* resolvedValue);
 void RestoreScreenshotRenderState(void);
+void SetScreenshotCatVisible(int visible);
 int RuntimePaletteInfoIsReady(void);
 int SelectableKeepPopupOpen(const char* label, bool selected, const float size[2]);
 void SetAllPartTextures(uint8_t* parts, int texture);
