@@ -21,7 +21,7 @@ After launching the game with Developer Mode enabled, click the new **Cat Editor
 
 ### Editor Controls Overview
 
-Use the sliders, `<` and `>` buttons, dropdowns, and clickable **ID:** button fields to change the different parts of your cat!
+Use the sliders, `<` and `>` buttons, dropdowns, and the clickable **ID:** button input fields to change the different parts of your cat!
 
 ### Editor Buttons
 
@@ -63,7 +63,7 @@ Catstructor is recommended for use with the [Custom Stray Framework](https://www
 
 ### Custom Palette Support
 
-Catstructor is compatible with [MewPaletteExtender](https://www.nexusmods.com/mewgenics/mods/369). Please read [this tutorial](https://github.com/Pseudonym-Tim/mew-palette-extender#making-a-custom-palette-mod) explaining how you can add your own custom palettes.
+Catstructor is compatible with [MewPaletteExtender](https://www.nexusmods.com/mewgenics/mods/369). Please read [this tutorial](https://github.com/Pseudonym-Tim/mew-palette-extender#making-a-custom-palette-mod) explaining how you can add your own custom palettes. 
 
 You can have your cat use a custom modded palette by clicking the "**ID:**" field button next to **palette**, then typing in the palette's custom ID name, such as:
 
@@ -75,9 +75,12 @@ You should then see that your cat updates to reflect the colors of your palette.
 
 Custom palette IDs are preserved when saving your cat or copying its `.gon` data.
 
-### Future Support
+## TODO/Future Support
 
-A custom cat-part and texture framework is almost finished and will be released in the future.
-Once released, Catstructor will receive additional editor functionality for selecting and entering custom modded cat parts and textures, similar to its current support for custom modded palettes.
+* A cat part and texture framework that will interface with this editor, similar in functionality to MewPaletteExtender. This will allow modders to easily add brand new mod-compatible things such as: cat body pieces, cat textures, and item visuals.
 
-Additionally, a way to add/view items or equipment on cats would also be something that is considered
+* The ability to add and view various items/equipment on your cats
+
+* Mutation info for your cat's currently selected parts/textures
+
+* Toggling visibility of individual cat parts
