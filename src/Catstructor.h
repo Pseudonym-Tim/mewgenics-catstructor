@@ -16,6 +16,8 @@
 #define RVA_SINGING_BUTTON_CALLBACK 0x0032D950 // Singing Test button callback...
 #define RVA_BIND_SINGING_TEST_BUTTON 0x0031B300 // Native binder that hooks the Singing Test button to callback...
 #define RVA_SINGING_SCENE_INIT 0x0079B2C0 // Singing Test scene setup, where custom editor scene gets attached without disrupting startup...
+#define RVA_SINGING_SCENE_UPDATE 0x0079C540 // Singing Test per-frame update...
+#define RVA_SINGING_R_RANDOMIZE_BRANCH 0x0079C662 // (For skipping the native SDL scancode R randomize block)...
 #define RVA_SINGING_SCENE_DRAW_IMGUI 0x0079C8B0 // Singing Test ImGui draw pass (this is the safe spot to render the editor every frame)...
 
 #define RVA_IMAGE_DECODE_FROM_MEMORY 0x00A729F0 // Game image decoder...
@@ -42,7 +44,6 @@
 
 #define RVA_GON_FILE_REGISTRY 0x013BCF40 // Global GON registry pointer used by the game's file loader...
 #define RVA_CATGEN_INTERNAL_POINTER 0x013BE710 // Internal cat-generator singleton used to enumerate custom cat presets...
-
 #define RVA_SINGING_UI_CLASS_STRING 0x01112850 // Literal SingingTestUI class name used as a cheap useful anchor...
 #define RVA_SINGING_BUTTON_TITLE_STRING 0x00F04DC0 // Native title string for the Singing Test button, another anchor...
 #define RVA_SINGING_UI_BINDINGS_START 0x0079B7AC // Start of the Singing Test binding block we patch around...
@@ -56,6 +57,7 @@
 #define BIND_SINGING_STOLEN_BYTES 15
 #define BUTTON_CALLBACK_STOLEN_BYTES 18
 #define SINGING_INIT_STOLEN_BYTES 18
+#define SINGING_UPDATE_STOLEN_BYTES 15
 #define SINGING_DRAW_STOLEN_BYTES 21
 
 #define BUTTON_CALLBACK_OBJECT_OFFSET 0x0F0
@@ -104,6 +106,7 @@
 #define DISPLAY_OBJECT_RENDER_FLAGS_OFFSET 0x008
 #define DISPLAY_OBJECT_ACTIVE_MASK 0x060
 #define DISPLAY_OBJECT_CLIP_DEPTH_OFFSET 0x018
+#define DISPLAY_OBJECT_NAME_OFFSET 0x048
 
 #define CATPART_PALETTE_OFFSET 0x01C
 #define CATPART_BODY_ID_OFFSET 0x030
@@ -219,7 +222,9 @@
 #define BASE_PALETTE_TEXTURE_ROWS 256
 #define PALETTE_MARKER_MINIMUM_ROWS 8
 #define TIMELINE_CONTAINER_CAPACITY 16
-#define TIMELINE_PROFILE_CACHE_CAPACITY 64
+#define TIMELINE_PROFILE_CACHE_CAPACITY 1024
+#define TIMELINE_INITIAL_TEXTURE_DISCOVERY_BUDGET_PER_FRAME 8
+#define TIMELINE_PROFILE_PROBE_BUDGET_PER_FRAME 128
 #define TIMELINE_BACKGROUND_REPEAT_LENGTH 8
 #define VOICE_NAME_BUFFER_SIZE 128
 #define NAMED_ID_BUFFER_SIZE 128
@@ -266,6 +271,7 @@
 typedef void (__fastcall *fn_house_init)(void* house);
 typedef void (__fastcall *fn_button_callback)(void* callback);
 typedef void (__fastcall *fn_scene_init)(void* scene);
+typedef void (__fastcall *fn_scene_update)(void* scene);
 typedef void (__fastcall *fn_scene_draw)(void* scene);
 
 typedef void* (__fastcall *fn_get_movieclip_child)(void* movieClip, const void* childName);
@@ -389,6 +395,7 @@ typedef void (__fastcall *fn_material_set_int)(void* material, MsvcString* param
 typedef uint8_t* (__fastcall *fn_image_decode_from_memory)(void* streamRange, int32_t* width, int32_t* height, int32_t* channels, int32_t requestedChannels);
 typedef int (__cdecl *fn_resolve_palette_id)(const char* id, int32_t* resolvedRow);
 typedef int (__cdecl *fn_resolve_cat_part_id)(const char* id, const char* expectedKind, int32_t* resolvedFrame);
+typedef int (__cdecl *fn_sync_cat_texture_clip)(const char* partKind, void* textureMovieClip);
 
 typedef struct PatchBackup
 {
@@ -456,12 +463,21 @@ typedef struct TimelineProfile
     const void* definition;
     TimelineChildKey* commonChildren;
     TimelineChildKey* backgroundChildren;
+    TimelineChildKey* soleSpecificKeys;
     unsigned char* backgroundFirstFrames;
     unsigned char* distinctArtFrames;
+    unsigned short* specificChildTotals;
+    unsigned short* renderedChildTotals;
+    UINT_PTR* frameFingerprintFirst;
+    UINT_PTR* frameFingerprintSecond;
+    void* buildState;
     int frameExtent;
     int commonChildTotal;
     int backgroundChildTotal;
     int learnsBackgroundChildren;
+    int buildStage;
+    int buildCursor;
+    int buildComplete;
 } TimelineProfile;
 
 typedef struct TimelineIDMap
@@ -472,6 +488,7 @@ typedef struct TimelineIDMap
     int minimum;
     int maximum;
     int validTotal;
+    int building;
 } TimelineIDMap;
 
 typedef struct TimelineFrameFingerprint
@@ -523,10 +540,12 @@ extern volatile LONG g_paletteInfoReady;
 extern volatile LONG g_paletteInfoGeneration;
 extern int g_paletteHeight;
 extern int g_timelineVisualNeedsRefresh;
+extern int g_timelineInitialIndexingComplete;
 extern void* g_timelineValidatedVisual[APPEARANCE_FIELD_COUNT];
 extern int g_timelineValidatedValue[APPEARANCE_FIELD_COUNT];
 extern int g_defaultFrame;
 extern int g_skipBlankArt;
+extern int g_symmetryEnabled;
 extern bool g_editorWindowOpen;
 extern float g_sliderNavigationHeight;
 extern int g_screenshotState;
@@ -549,6 +568,7 @@ void ApplyPaletteMaterial(void* catVisual, const uint8_t* parts);
 int BeginNativeAlphaScreenshot(void);
 int BuildCustomCatPresetCache(void);
 int CaptureCatScreenshot(void);
+int CaptureInitialIndexingAppearance(const uint8_t* parts);
 int CaptureScreenshotBackgroundBlackPass(void);
 int CaptureScreenshotBlackPass(void);
 int CaptureScreenshotWhitePass(void);
@@ -577,8 +597,11 @@ int GetGraphicsEntries(void* catVisual, size_t containerOffset, uint8_t** outEnt
 const char* GetMsvcStringText(const MsvcString* value);
 TimelineIDMap* GetPaletteIDMap(int minimum, int maximum, int skipBlankRows);
 int GetRuntimePaletteHeight(void);
+void BeginTimelineIndexingFrame(void);
+int AdvanceAllPartTextureIndexes(void* catVisual, int* outPercent);
 TimelineIDMap* GetTimelineIDMap(void* catVisual, AppearanceField field, int minimum, int maximum);
 int GetVoiceSetEntries(uint8_t** outBegin, uint8_t** outEnd);
+int PrepareFreshEditorEntryIfNeeded(void* catVisual, uint8_t* parts);
 void HookSceneDraw(void* scene);
 void InitMsvcString(MsvcString* value, const char* text);
 int IsReadableMemoryRange(const void* address, size_t length);
@@ -587,12 +610,15 @@ const char* NamedKindForField(AppearanceField field);
 void ParkScreenshotCursor(void);
 void PinScreenshotCatAnimations(void);
 void ReadAppearance(const uint8_t* parts, AppearanceSnapshot* appearance);
+void ResetInitialIndexingAppearanceSnapshot(void);
 int ResolveNamedAppearanceID(AppearanceField field, const char* token, int* resolvedValue);
+int SyncMcpfTextureClip(const char* partKind, void* textureMovieClip);
 void RestoreScreenshotRenderState(void);
 void SetScreenshotCatVisible(int visible);
 int RuntimePaletteInfoIsReady(void);
 int SelectableKeepPopupOpen(const char* label, bool selected, const float size[2]);
 void SetAllPartTextures(uint8_t* parts, int texture);
+void SyncMcpfVisualTextureState(void* catVisual, int oneBasedTexture);
 void SetMovieClipFrameForInspection(void* movieClip, int zeroBasedFrame);
 int SetMsvcString(MsvcString* value, const char* text);
 void SetNamedAppearanceID(AppearanceField field, const char* token);

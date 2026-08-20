@@ -14,6 +14,7 @@ HMODULE g_module;
 static fn_bind_singing_button g_originalBindSingingButton;
 static fn_button_callback g_originalButtonCallback;
 static fn_scene_init g_originalSceneInit;
+static fn_scene_update g_originalSceneUpdate;
 fn_scene_draw g_originalSceneDraw;
 
 static fn_image_decode_from_memory g_originalImageDecodeFromMemory;
@@ -38,11 +39,13 @@ fn_imgui_begin_combo g_imguiBeginCombo;
 fn_imgui_end_combo g_imguiEndCombo;
 static fn_resolve_palette_id g_resolvePaletteID;
 static fn_resolve_cat_part_id g_resolveCatPartID;
+static fn_sync_cat_texture_clip g_syncCatTextureClip;
 
 static void* volatile g_customButtonCallback;
 static void* volatile g_activeDemoMenu;
 void* volatile g_customScene;
 static volatile LONG g_customLaunchDepth;
+static volatile LONG g_editorNeedsFreshCat;
 volatile LONG g_missingCatLogged;
 static volatile LONG g_installStarted;
 static volatile LONG g_installed;
@@ -67,10 +70,12 @@ volatile LONG g_paletteInfoReady;
 volatile LONG g_paletteInfoGeneration;
 int g_paletteHeight;
 int g_timelineVisualNeedsRefresh;
+int g_timelineInitialIndexingComplete;
 void* g_timelineValidatedVisual[APPEARANCE_FIELD_COUNT];
 int g_timelineValidatedValue[APPEARANCE_FIELD_COUNT];
 int g_defaultFrame = APPEARANCE_DEFAULT_FRAME;
 int g_skipBlankArt = 1;
+int g_symmetryEnabled;
 bool g_editorWindowOpen = true;
 float g_sliderNavigationHeight = DEBUG_ARROW_HEIGHT;
 int g_screenshotState;
@@ -199,6 +204,7 @@ int SetMsvcString(MsvcString* value, const char* text)
     }
 
     length = strlen(text);
+
     if (length >= VOICE_NAME_BUFFER_SIZE)
     {
         return 0;
@@ -460,13 +466,20 @@ static void RefreshCompatibilityResolvers(void)
         }
     }
 
-    if (!g_resolveCatPartID)
+    if (!g_resolveCatPartID || !g_syncCatTextureClip)
     {
         module = GetModuleHandleA("MewCatPartFramework.dll");
 
         if (module)
         {
-            g_resolveCatPartID = (fn_resolve_cat_part_id)GetProcAddress(module, "MewCatPartFramework_ResolvePart");
+            if (!g_resolveCatPartID)
+            {
+                g_resolveCatPartID = (fn_resolve_cat_part_id)GetProcAddress(module, "MewCatPartFramework_ResolvePart");
+            }
+            if (!g_syncCatTextureClip)
+            {
+                g_syncCatTextureClip = (fn_sync_cat_texture_clip)GetProcAddress(module, "MewCatPartFramework_SyncTextureClip");
+            }
         }
     }
 }
@@ -475,6 +488,8 @@ const char* NamedKindForField(AppearanceField field)
 {
     switch (field)
     {
+        case APPEARANCE_FIELD_TEXTURE:
+            return "texture";
         case APPEARANCE_FIELD_BODY:
             return "body";
         case APPEARANCE_FIELD_HEAD:
@@ -512,6 +527,17 @@ int FieldSupportsNamedID(AppearanceField field)
     }
 
     return NamedKindForField(field) != NULL && g_resolveCatPartID != NULL;
+}
+
+int SyncMcpfTextureClip(const char* partKind, void* textureMovieClip)
+{
+    if (!partKind || !textureMovieClip)
+    {
+        return 0;
+    }
+
+    RefreshCompatibilityResolvers();
+    return g_syncCatTextureClip ? g_syncCatTextureClip(partKind, textureMovieClip) : 0;
 }
 
 int ResolveNamedAppearanceID(AppearanceField field, const char* token, int* resolvedValue)
@@ -780,21 +806,29 @@ static void* HookGetMovieClipChild(void* movieClip, const void* childName)
 {
     const char* childText;
     int isSingingTest;
+    void* previousMenu;
     void* result;
 
     /*
-    * The native initializer asks its active menu for "singingtest" right
-    * before binding the button. Read temporary string before native call eats it, 
-    * then cache exact parent menu instead of doing a brittle second class lookup...
+    * Debug tools menu is destroyed and rebuilt when the user leaves it.
+    * Refresh the parent on every native "singingtest" lookup...
+    *
+    * This hook is hot, so keep the non-matching path to one inline MSVC-string
+    * view and the original lookup, no extra child searches are performed...
     */
-    childText = GetMsvcStringText((const MsvcString*)childName);
-    isSingingTest = childText && strcmp(childText, "singingtest") == 0;
+    isSingingTest = childName && ((const MsvcString*)childName)->length == sizeof("singingtest") - 1;
+    childText = isSingingTest ? GetMsvcStringText((const MsvcString*)childName) : NULL;
+    isSingingTest = childText && memcmp(childText, "singingtest", sizeof("singingtest") - 1) == 0;
     result = g_originalGetMovieClipChild(movieClip, childName);
 
     if (isSingingTest)
     {
-        InterlockedExchangePointer((PVOID volatile*)&g_activeDemoMenu, movieClip);
-        Log("Captured active menu %p from native singingtest child %p", movieClip, result);
+        previousMenu = InterlockedExchangePointer((PVOID volatile*)&g_activeDemoMenu, movieClip);
+        
+        if (previousMenu != movieClip)
+        {
+            Log("Captured active menu %p from native singingtest child %p", movieClip, result);
+        }
     }
 
     return result;
@@ -892,6 +926,42 @@ static void HookButtonCallback(void* callback)
     }
 }
 
+int PrepareFreshEditorEntryIfNeeded(void* catVisual, uint8_t* parts)
+{
+    if (InterlockedCompareExchange(&g_editorNeedsFreshCat, 0, 0) == 0)
+    {
+        return 0;
+    }
+
+    if (!catVisual || !parts)
+    {
+        return 0;
+    }
+
+    /* 
+    * Custom editor scene can reuse transient state from the previous visit.
+    * Capture the current generated stray before the exhaustive scanner
+    * walks any live part/texture timelines, leave the CatParts
+    * state in place while indexing runs. Snapshot is restored at the end...
+    */
+    if (!CaptureInitialIndexingAppearance(parts))
+    {
+        return 0;
+    }
+
+    ClearNamedAppearanceIDs();
+    memset(g_idInputStates, 0, sizeof(g_idInputStates));
+    g_activeIDInput = APPEARANCE_FIELD_COUNT;
+    g_activeAppearancePath[0] = '\0';
+    g_selectedPresetName[0] = '\0';
+    memset(g_timelineValidatedVisual, 0, sizeof(g_timelineValidatedVisual));
+    memset(g_timelineValidatedValue, 0, sizeof(g_timelineValidatedValue));
+
+    InterlockedExchange(&g_editorNeedsFreshCat, 0);
+    Log("Prepared fresh editor entry, captured the starting stray for restoration after initial indexing");
+    return 1;
+}
+
 static void HookSceneInit(void* scene)
 {
     static const char replacementClass[16] = "CatAppearanceUI";
@@ -901,6 +971,8 @@ static void HookSceneInit(void* scene)
     PatchBackup classPatch;
     PatchBackup bindingsPatch;
     PatchBackup loopPatch;
+    void* catVisual;
+    uint8_t* parts;
 
     if (InterlockedCompareExchange(&g_customLaunchDepth, 0, 0) == 0)
     {
@@ -936,7 +1008,13 @@ static void HookSceneInit(void* scene)
     memset(g_timelineValidatedVisual, 0, sizeof(g_timelineValidatedVisual));
     memset(g_timelineValidatedValue, 0, sizeof(g_timelineValidatedValue));
     ClearNamedAppearanceIDs();
+    memset(g_idInputStates, 0, sizeof(g_idInputStates));
+    memset(g_keyWasDown, 0, sizeof(g_keyWasDown));
+    memset(g_keyPressed, 0, sizeof(g_keyPressed));
+    g_activeIDInput = APPEARANCE_FIELD_COUNT;
     g_defaultFrame = APPEARANCE_DEFAULT_FRAME;
+    g_timelineInitialIndexingComplete = 0;
+    ResetInitialIndexingAppearanceSnapshot();
     g_editorWindowOpen = true;
     RestoreScreenshotRenderState();
     g_screenshotState = SCREENSHOT_STATE_IDLE;
@@ -951,7 +1029,8 @@ static void HookSceneInit(void* scene)
         RestorePatch(&classPatch);
         LeaveCriticalSection(&g_patchLock);
         InterlockedExchangePointer((PVOID volatile*)&g_customScene, NULL);
-        Log("Cat Appearance Debug scene patching failed; init was cancelled.");
+        InterlockedExchange(&g_editorNeedsFreshCat, 0);
+        Log("Cat Appearance Debug scene patching failed, init was cancelled!");
         return;
     }
 
@@ -961,7 +1040,66 @@ static void HookSceneInit(void* scene)
     RestorePatch(&bindingsPatch);
     RestorePatch(&classPatch);
     LeaveCriticalSection(&g_patchLock);
-    Log("Initialized CatAppearanceUI with one cat visual!");
+
+    InterlockedExchange(&g_editorNeedsFreshCat, 1);
+    catVisual = NULL;
+    parts = GetCatParts(scene, &catVisual);
+
+    if (!PrepareFreshEditorEntryIfNeeded(catVisual, parts))
+    {
+        Log("Initialized CatAppearanceUI, fresh editor-entry preparation will retry!");
+    }
+    else
+    {
+        Log("Initialized CatAppearanceUI, indexing will restore the same starting stray when complete!");
+    }
+}
+
+static void HookSceneUpdate(void* scene)
+{
+    static const unsigned char skipRandomizeOpcode = 0xEB;
+    static LONG unexpectedRandomizeBranchLogged;
+    PatchBackup randomizeBranchPatch;
+    unsigned char* randomizeBranch;
+    int editingID;
+    int branchPatched;
+
+    /*
+    * SingingCatTest::update checks SDL scancode 0x15 (R) and randomizes the
+    * scene's cats...
+    * 
+    * While our ID editor owns keyboard input, we temporarily change only the JNE
+    * opcode (75 -> EB), preserving the existing +0x66 displacement. This
+    * makes the skip unconditional for exactly one update. Opcode
+    * is restored before returning, so R retains its normal behavior whenever no ID field is active!
+    */
+    memset(&randomizeBranchPatch, 0, sizeof(randomizeBranchPatch));
+    randomizeBranch = (unsigned char*)(g_gameBase + RVA_SINGING_R_RANDOMIZE_BRANCH);
+    editingID = scene && InterlockedCompareExchangePointer((PVOID volatile*)&g_customScene, NULL, NULL) == scene && g_activeIDInput >= 0 && g_activeIDInput < APPEARANCE_FIELD_COUNT;
+    branchPatched = 0;
+
+    if (editingID && IsReadableMemoryRange(randomizeBranch, 2) && randomizeBranch[0] == 0x75 && randomizeBranch[1] == 0x66)
+    {
+        EnterCriticalSection(&g_patchLock);
+        branchPatched = ApplyPatch(&randomizeBranchPatch, RVA_SINGING_R_RANDOMIZE_BRANCH, &skipRandomizeOpcode, sizeof(skipRandomizeOpcode));
+
+        if (!branchPatched)
+        {
+            LeaveCriticalSection(&g_patchLock);
+        }
+    }
+    else if (editingID && (!IsReadableMemoryRange(randomizeBranch, 2) || randomizeBranch[0] != 0xEB || randomizeBranch[1] != 0x66) && InterlockedCompareExchange(&unexpectedRandomizeBranchLogged, 1, 0) == 0)
+    {
+        Log("Could not suppress Singing Test R randomize!");
+    }
+
+    g_originalSceneUpdate(scene);
+
+    if (branchPatched)
+    {
+        RestorePatch(&randomizeBranchPatch);
+        LeaveCriticalSection(&g_patchLock);
+    }
 }
 
 uint8_t* GetCatParts(void* scene, void** outCatVisual)
@@ -1475,6 +1613,16 @@ static void InstallRuntime(void)
 
     trampoline = NULL;
 
+    if (!InstallHook(RVA_SINGING_SCENE_UPDATE, SINGING_UPDATE_STOLEN_BYTES, HookSceneUpdate, &trampoline))
+    {
+        Log("Failed to hook SingingCatTest::update for ID input shortcut suppression!");
+        return;
+    }
+
+    g_originalSceneUpdate = (fn_scene_update)trampoline;
+
+    trampoline = NULL;
+
     if (!InstallHook(RVA_SINGING_SCENE_DRAW_IMGUI, SINGING_DRAW_STOLEN_BYTES, HookSceneDraw, &trampoline))
     {
         Log("Failed to hook SingingCatTest's ImGui panel!");
@@ -1484,7 +1632,7 @@ static void InstallRuntime(void)
     g_originalSceneDraw = (fn_scene_draw)trampoline;
 
     InterlockedExchange(&g_installed, 1);
-    Log("Installed, the active menu will be captured from its native singingtest child lookup!");
+    Log("Installed, the active debug menu will be refreshed from each native singingtest child lookup!");
 }
 
 #ifdef _MSC_VER

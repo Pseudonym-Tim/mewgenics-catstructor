@@ -20,6 +20,7 @@ static int FormatAppearanceText(const uint8_t* parts, char* text, size_t textSiz
     AppearanceSnapshot value;
     SYSTEMTIME now;
 
+    char texture[32];
     char palette[32];
     char body[32];
     char head[32];
@@ -48,7 +49,7 @@ static int FormatAppearanceText(const uint8_t* parts, char* text, size_t textSiz
         "// Paste this block into your custom_cats.gon.append and name it appropriately!\r\n"
         "Cat_%04u%02u%02u_%02u%02u%02u {\r\n"
         "    default_frame %d\r\n"
-        "    texture %d\r\n"
+        "    texture %s\r\n"
         "    claws %d\r\n"
         "    palette %s\r\n"
         "    body %s\r\n"
@@ -75,7 +76,12 @@ static int FormatAppearanceText(const uint8_t* parts, char* text, size_t textSiz
         (unsigned int)now.wMinute,
         (unsigned int)now.wSecond,
         APPEARANCE_DEFAULT_FRAME,
-        value.texture,
+        FormatAppearanceIDToken(
+            APPEARANCE_FIELD_TEXTURE,
+            value.texture,
+            texture,
+            sizeof(texture)
+        ),
         value.claws,
         FormatAppearanceIDToken(
             APPEARANCE_FIELD_PALETTE,

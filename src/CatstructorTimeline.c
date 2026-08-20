@@ -5,6 +5,49 @@
 */
 
 static int TimelineChildIsNamedHelper(const uint8_t* entry, const void* child);
+static int TimelineFrameFingerprintEquals(const TimelineFrameFingerprint* first, const TimelineFrameFingerprint* second);
+
+#define TIMELINE_HELPER_CHILD_CAPACITY 3
+#define TIMELINE_SHARED_TEXTURE_BACKGROUND_CHILDREN 2
+#define TIMELINE_TRAILING_TEXTURE_GARBAGE_MIN_CHILDREN 4
+#define TIMELINE_TEXTURE_KIND_BODY_MASK 0x01U
+#define TIMELINE_TEXTURE_KIND_HEAD_MASK 0x02U
+#define TIMELINE_TEXTURE_KIND_TAIL_MASK 0x04U
+#define TIMELINE_TEXTURE_KIND_LEG_MASK 0x08U
+#define TIMELINE_TEXTURE_KIND_EAR_MASK 0x10U
+#define TIMELINE_TEXTURE_KIND_ALL_MASK (TIMELINE_TEXTURE_KIND_BODY_MASK | TIMELINE_TEXTURE_KIND_HEAD_MASK | TIMELINE_TEXTURE_KIND_TAIL_MASK | TIMELINE_TEXTURE_KIND_LEG_MASK | TIMELINE_TEXTURE_KIND_EAR_MASK)
+
+static int g_timelineProfileProbeBudget = TIMELINE_PROFILE_PROBE_BUDGET_PER_FRAME;
+
+typedef struct InitialPartTextureIndexState
+{
+    AppearanceField field;
+    int validIndex;
+    int completedTotal;
+    int targetTotal;
+    int targetsReady;
+} InitialPartTextureIndexState;
+
+static InitialPartTextureIndexState g_initialPartTextureIndex =
+{
+    APPEARANCE_FIELD_BODY, 0, 0, 0, 0
+};
+
+void BeginTimelineIndexingFrame(void)
+{
+    g_timelineProfileProbeBudget = TIMELINE_PROFILE_PROBE_BUDGET_PER_FRAME;
+}
+
+static int ConsumeTimelineProfileProbeBudget(void)
+{
+    if (g_timelineProfileProbeBudget <= 0)
+    {
+        return 0;
+    }
+
+    --g_timelineProfileProbeBudget;
+    return 1;
+}
 
 void SetAllPartTextures(uint8_t* parts, int texture)
 {
@@ -105,6 +148,33 @@ static int ReadTimelineChildKey(const void* child, TimelineChildKey* outKey)
     return 1;
 }
 
+static int ReadTimelineChildKeyFast(const void* child, TimelineChildKey* outKey)
+{
+    if (!child || !outKey)
+    {
+        return 0;
+    }
+
+    outKey->characterID = *(const uint16_t*)((const uint8_t*)child + DISPLAY_OBJECT_CHARACTER_ID_OFFSET);
+    outKey->libraryID = *(const uint16_t*)((const uint8_t*)child + DISPLAY_OBJECT_LIBRARY_ID_OFFSET);
+    return 1;
+}
+
+static int IsTimelineChildRenderableFast(const void* child)
+{
+    unsigned char flags;
+    int clipDepth;
+
+    if (!child)
+    {
+        return 0;
+    }
+
+    flags = *((const unsigned char*)child + DISPLAY_OBJECT_RENDER_FLAGS_OFFSET);
+    clipDepth = *(const int*)((const uint8_t*)child + DISPLAY_OBJECT_CLIP_DEPTH_OFFSET);
+    return (flags & DISPLAY_OBJECT_ACTIVE_MASK) == DISPLAY_OBJECT_ACTIVE_MASK && clipDepth <= 0;
+}
+
 static int TimelineChildKeyEquals(const TimelineChildKey* first, const TimelineChildKey* second)
 {
     return first && second && first->characterID == second->characterID && first->libraryID == second->libraryID;
@@ -117,7 +187,7 @@ static int TimelineChildrenContainKey(void** children, int childTotal, const Tim
 
     for (index = 0; index < childTotal; ++index)
     {
-        if (ReadTimelineChildKey(children[index], &candidate) && TimelineChildKeyEquals(&candidate, key))
+        if (ReadTimelineChildKeyFast(children[index], &candidate) && TimelineChildKeyEquals(&candidate, key))
         {
             return 1;
         }
@@ -197,6 +267,112 @@ static void RefreshGraphicsEntryChildren(uint8_t* entry)
     *(void**)(entry + CATPART_GRAPHICS_AUX_CLIP_OFFSET) = GetMovieClipNamedChild(movieClip, "aux");
 }
 
+static void* RefreshGraphicsEntryTextureChild(uint8_t* entry)
+{
+    void* movieClip;
+    void* textureClip;
+
+    if (!entry || !IsReadableMemoryRange(entry, CATPART_GRAPHICS_ENTRY_SIZE))
+    {
+        return NULL;
+    }
+
+    movieClip = *(void**)(entry + CATPART_GRAPHICS_MOVIECLIP_OFFSET);
+    textureClip = GetMovieClipNamedChild(movieClip, "tex");
+    *(void**)(entry + CATPART_GRAPHICS_TEXTURE_CLIP_OFFSET) = textureClip;
+    return textureClip;
+}
+
+static const char* McpfTextureKindForContainer(size_t containerOffset)
+{
+    switch (containerOffset)
+    {
+        case CAT_VISUAL_BODY_GRAPHICS_OFFSET:
+            return "body";
+        case CAT_VISUAL_HEAD_GRAPHICS_OFFSET:
+            return "head";
+        case CAT_VISUAL_TAIL_GRAPHICS_OFFSET:
+            return "tail";
+        case CAT_VISUAL_LEG1_GRAPHICS_OFFSET:
+        case CAT_VISUAL_LEG2_GRAPHICS_OFFSET:
+        case CAT_VISUAL_ARM1_GRAPHICS_OFFSET:
+        case CAT_VISUAL_ARM2_GRAPHICS_OFFSET:
+            return "leg";
+        case CAT_VISUAL_LEFTEAR_GRAPHICS_OFFSET:
+        case CAT_VISUAL_RIGHTEAR_GRAPHICS_OFFSET:
+            return "ear";
+        default:
+            return NULL;
+    }
+}
+
+static unsigned int TextureKindMaskForContainer(size_t containerOffset)
+{
+    switch (containerOffset)
+    {
+        case CAT_VISUAL_BODY_GRAPHICS_OFFSET:
+            return TIMELINE_TEXTURE_KIND_BODY_MASK;
+        case CAT_VISUAL_HEAD_GRAPHICS_OFFSET:
+            return TIMELINE_TEXTURE_KIND_HEAD_MASK;
+        case CAT_VISUAL_TAIL_GRAPHICS_OFFSET:
+            return TIMELINE_TEXTURE_KIND_TAIL_MASK;
+        case CAT_VISUAL_LEG1_GRAPHICS_OFFSET:
+        case CAT_VISUAL_LEG2_GRAPHICS_OFFSET:
+        case CAT_VISUAL_ARM1_GRAPHICS_OFFSET:
+        case CAT_VISUAL_ARM2_GRAPHICS_OFFSET:
+            return TIMELINE_TEXTURE_KIND_LEG_MASK;
+        case CAT_VISUAL_LEFTEAR_GRAPHICS_OFFSET:
+        case CAT_VISUAL_RIGHTEAR_GRAPHICS_OFFSET:
+            return TIMELINE_TEXTURE_KIND_EAR_MASK;
+        default:
+            return 0;
+    }
+}
+
+static void SyncMcpfTextureChildrenForContainer(size_t containerOffset, uint8_t* entries, int entryTotal, int oneBasedTexture)
+{
+    const char* kind;
+    uint8_t* entry;
+    void* textureClip;
+    int frameExtent;
+    int index;
+
+    kind = McpfTextureKindForContainer(containerOffset);
+
+    if (!entries || entryTotal <= 0)
+    {
+        return;
+    }
+
+    entry = entries;
+
+    for (index = 0; index < entryTotal; ++index, entry += CATPART_GRAPHICS_ENTRY_SIZE)
+    {
+        // Only tex is relevant here...
+        textureClip = RefreshGraphicsEntryTextureChild(entry);
+
+        if (!textureClip)
+        {
+            continue;
+        }
+
+        if (kind)
+        {
+            SyncMcpfTextureClip(kind, textureClip);
+        }
+
+        if (oneBasedTexture > 0)
+        {
+            frameExtent = GetMovieClipFrameExtent(textureClip);
+
+            if (oneBasedTexture <= frameExtent)
+            {
+                SetMovieClipFrameForInspection(textureClip, oneBasedTexture - 1);
+            }
+        }
+    }
+}
+
 int GetGraphicsEntries(void* catVisual, size_t containerOffset, uint8_t** outEntries, int* outEntryTotal)
 {
     uint8_t* container;
@@ -244,6 +420,55 @@ int GetGraphicsEntries(void* catVisual, size_t containerOffset, uint8_t** outEnt
     *outEntries = entries;
     *outEntryTotal = entryTotal;
     return 1;
+}
+
+/*
+* Synchronize MCPF texture timelines on the live CatVisual and then
+* reapply the currently selected texture frame to those clips...
+*/
+void SyncMcpfVisualTextureState(void* catVisual, int oneBasedTexture)
+{
+    static const size_t textureContainers[] =
+    {
+        CAT_VISUAL_BODY_GRAPHICS_OFFSET,
+        CAT_VISUAL_HEAD_GRAPHICS_OFFSET,
+        CAT_VISUAL_TAIL_GRAPHICS_OFFSET,
+        CAT_VISUAL_LEG1_GRAPHICS_OFFSET,
+        CAT_VISUAL_LEG2_GRAPHICS_OFFSET,
+        CAT_VISUAL_ARM1_GRAPHICS_OFFSET,
+        CAT_VISUAL_ARM2_GRAPHICS_OFFSET,
+        CAT_VISUAL_LEFTEYE_GRAPHICS_OFFSET,
+        CAT_VISUAL_RIGHTEYE_GRAPHICS_OFFSET,
+        CAT_VISUAL_LEFTEYEBROW_GRAPHICS_OFFSET,
+        CAT_VISUAL_RIGHTEYEBROW_GRAPHICS_OFFSET,
+        CAT_VISUAL_LEFTEAR_GRAPHICS_OFFSET,
+        CAT_VISUAL_RIGHTEAR_GRAPHICS_OFFSET,
+        CAT_VISUAL_MOUTH_GRAPHICS_OFFSET
+    };
+
+    size_t containerIndex;
+    uint8_t* entries;
+    int entryTotal;
+
+    if (!catVisual || oneBasedTexture < 1)
+    {
+        return;
+    }
+
+    /*
+    * Synchronization here, immediately after an actual CatVisual
+    * refresh/rebuild. GetGraphicsEntries is intentionally a pure accessor,
+    * timeline probing calls it a bunch of times while building ID maps...
+    */
+    for (containerIndex = 0; containerIndex < sizeof(textureContainers) / sizeof(textureContainers[0]); ++containerIndex)
+    {
+        if (!GetGraphicsEntries(catVisual, textureContainers[containerIndex], &entries, &entryTotal))
+        {
+            continue;
+        }
+
+        SyncMcpfTextureChildrenForContainer(textureContainers[containerIndex], entries, entryTotal, oneBasedTexture);
+    }
 }
 
 static size_t GetTimelineContainerOffsets(AppearanceField field, size_t offsets[TIMELINE_CONTAINER_CAPACITY])
@@ -325,9 +550,19 @@ static void* GetTimelineEntryClip(uint8_t* entry, AppearanceField field)
 
     if (field == APPEARANCE_FIELD_TEXTURE)
     {
-        // The outer part frame may have replaced its named child objects...
-        RefreshGraphicsEntryChildren(entry);
-        return *(void**)(entry + CATPART_GRAPHICS_TEXTURE_CLIP_OFFSET);
+        void* textureClip = *(void**)(entry + CATPART_GRAPHICS_TEXTURE_CLIP_OFFSET);
+
+        /* 
+        * Outer part frame changes refresh this cache explicitly. Texture-ID
+        * probing itself never changes the outer frame, so don't perform a
+        * native name lookup for every candidate...
+        */
+        if (!textureClip)
+        {
+            textureClip = RefreshGraphicsEntryTextureChild(entry);
+        }
+
+        return textureClip;
     }
 
     return *(void**)(entry + CATPART_GRAPHICS_MOVIECLIP_OFFSET);
@@ -363,7 +598,7 @@ int GetFieldTimelineExtent(void* catVisual, AppearanceField field)
         /*
         * CatPartGraphics appends the selectable base art first. Later
         * entries are passive/effect overlays and can have unrelated frame
-        * extents, so don't enlarge an editor ID range...
+        * extents, so don't enlarge editor ID range...
         */
         entry = entries;
         movieClip = GetTimelineEntryClip(entry, field);
@@ -395,6 +630,11 @@ static void ReleaseTimelineProfile(TimelineProfile* profile)
         HeapFree(GetProcessHeap(), 0, profile->backgroundChildren);
     }
 
+    if (profile->soleSpecificKeys)
+    {
+        HeapFree(GetProcessHeap(), 0, profile->soleSpecificKeys);
+    }
+
     if (profile->backgroundFirstFrames)
     {
         HeapFree(GetProcessHeap(), 0, profile->backgroundFirstFrames);
@@ -403,6 +643,31 @@ static void ReleaseTimelineProfile(TimelineProfile* profile)
     if (profile->distinctArtFrames)
     {
         HeapFree(GetProcessHeap(), 0, profile->distinctArtFrames);
+    }
+
+    if (profile->specificChildTotals)
+    {
+        HeapFree(GetProcessHeap(), 0, profile->specificChildTotals);
+    }
+
+    if (profile->renderedChildTotals)
+    {
+        HeapFree(GetProcessHeap(), 0, profile->renderedChildTotals);
+    }
+
+    if (profile->frameFingerprintFirst)
+    {
+        HeapFree(GetProcessHeap(), 0, profile->frameFingerprintFirst);
+    }
+
+    if (profile->frameFingerprintSecond)
+    {
+        HeapFree(GetProcessHeap(), 0, profile->frameFingerprintSecond);
+    }
+
+    if (profile->buildState)
+    {
+        HeapFree(GetProcessHeap(), 0, profile->buildState);
     }
 
     memset(profile, 0, sizeof(*profile));
@@ -418,6 +683,13 @@ void ClearTimelineProfiles(void)
     }
 
     g_timelineProfileUsed = 0;
+
+    /* 
+    * A fresh editor scene must discover the texture definition behind every
+    * selectable part frame again. This includes MCPF-added/modded frames...
+    */
+    memset(&g_initialPartTextureIndex, 0, sizeof(g_initialPartTextureIndex));
+    g_initialPartTextureIndex.field = APPEARANCE_FIELD_BODY;
 }
 
 static void ReleaseTimelineIdMap(TimelineIDMap* map)
@@ -467,6 +739,48 @@ static int TimelineChildKeyArrayContains(const TimelineChildKey* keys, int keyTo
     return 0;
 }
 
+static void RememberTimelineHelperKey(TimelineProfile* profile, const TimelineChildKey* key)
+{
+    if (!profile || !profile->commonChildren || !key || profile->commonChildTotal >= TIMELINE_HELPER_CHILD_CAPACITY || TimelineChildKeyArrayContains(profile->commonChildren, profile->commonChildTotal, key))
+    {
+        return;
+    }
+
+    profile->commonChildren[profile->commonChildTotal++] = *key;
+}
+
+static void InitializeTimelineHelperKeys(TimelineProfile* profile, void* movieClip)
+{
+    static const char* helperNames[TIMELINE_HELPER_CHILD_CAPACITY] = { "tex", "scars", "aux" };
+    TimelineChildKey key;
+    void* child;
+    int index;
+
+    if (!profile || !movieClip)
+    {
+        return;
+    }
+
+    profile->commonChildren = (TimelineChildKey*)HeapAlloc(GetProcessHeap(), 0, TIMELINE_HELPER_CHILD_CAPACITY * sizeof(*profile->commonChildren));
+    
+    if (!profile->commonChildren)
+    {
+        return;
+    }
+
+    profile->commonChildTotal = 0;
+
+    for (index = 0; index < TIMELINE_HELPER_CHILD_CAPACITY; ++index)
+    {
+        child = GetMovieClipNamedChild(movieClip, helperNames[index]);
+
+        if (ReadTimelineChildKey(child, &key))
+        {
+            RememberTimelineHelperKey(profile, &key);
+        }
+    }
+}
+
 static int IsTimelineChildRenderable(const void* child)
 {
     unsigned char flags;
@@ -500,7 +814,7 @@ static int FindSoleTimelineSpecificChild(void** children, int childTotal, const 
 
     for (childIndex = 0; childIndex < childTotal; ++childIndex)
     {
-        if (!IsTimelineChildRenderable(children[childIndex]) || !ReadTimelineChildKey(children[childIndex], &childKey) || TimelineChildKeyArrayContains(profile->commonChildren, profile->commonChildTotal, &childKey))
+        if (!IsTimelineChildRenderableFast(children[childIndex]) || !ReadTimelineChildKeyFast(children[childIndex], &childKey) || TimelineChildKeyArrayContains(profile->commonChildren, profile->commonChildTotal, &childKey))
         {
             continue;
         }
@@ -525,45 +839,572 @@ static int FindSoleTimelineSpecificChild(void** children, int childTotal, const 
     return 1;
 }
 
-static void RememberRepeatedTimelineChild(TimelineProfile* profile, const TimelineChildKey* key, int repeatLength)
+typedef struct TimelineBackgroundCandidate
 {
-    if (!profile || !profile->backgroundChildren || !key || repeatLength < TIMELINE_BACKGROUND_REPEAT_LENGTH || TimelineChildKeyArrayContains(profile->backgroundChildren, profile->backgroundChildTotal, key))
+    TimelineChildKey key;
+    int firstFrame;
+    int maxRepeat;
+} TimelineBackgroundCandidate;
+
+static int TimelineChildIsNamedHelperDirect(const void* child)
+{
+    const MsvcString* name;
+    const char* text;
+
+    if (!child)
+    {
+        return 0;
+    }
+
+    /*
+    * Child comes directly from MovieClip's validated live child array.
+    * Avoid VirtualQuery in this per-child/per-frame loop, the engine's
+    * own child-name scanner reads the same DisplayObject string in place...
+    */
+    name = (const MsvcString*)((const uint8_t*)child + DISPLAY_OBJECT_NAME_OFFSET);
+
+    /* 
+    * Use a single validation/read and dispatch by length, instead of constructing
+    * three names and invoking MovieClip::GetChild three times for every probed frame...
+    */
+    if (name->length != 3 && name->length != 5)
+    {
+        return 0;
+    }
+
+    if (name->capacity < name->length)
+    {
+        return 0;
+    }
+
+    if (name->capacity <= 15)
+    {
+        text = name->storage.small;
+    }
+    else
+    {
+        text = name->storage.heap;
+
+        if (!text || !IsReadableMemoryRange(text, name->length))
+        {
+            return 0;
+        }
+    }
+
+    if (name->length == 3)
+    {
+        return memcmp(text, "tex", 3) == 0 || memcmp(text, "aux", 3) == 0;
+    }
+
+    return memcmp(text, "scars", 5) == 0;
+}
+
+static int FindBackgroundCandidate(TimelineBackgroundCandidate* candidates, int candidateTotal, const TimelineChildKey* key)
+{
+    int index;
+
+    if (!candidates || !key)
+    {
+        return -1;
+    }
+
+    for (index = 0; index < candidateTotal; ++index)
+    {
+        if (TimelineChildKeyEquals(&candidates[index].key, key))
+        {
+            return index;
+        }
+    }
+
+    return -1;
+}
+
+static int EnsureBackgroundCandidate(TimelineBackgroundCandidate* candidates, int* candidateTotal, int candidateCapacity, const TimelineChildKey* key, int frame)
+{
+    int index;
+
+    if (!candidates || !candidateTotal || !key)
+    {
+        return -1;
+    }
+
+    index = FindBackgroundCandidate(candidates, *candidateTotal, key);
+
+    if (index >= 0)
+    {
+        return index;
+    }
+
+    if (*candidateTotal >= candidateCapacity)
+    {
+        return -1;
+    }
+
+    index = (*candidateTotal)++;
+    candidates[index].key = *key;
+    candidates[index].firstFrame = frame;
+    candidates[index].maxRepeat = 0;
+    return index;
+}
+
+static void FinishBackgroundRun(TimelineBackgroundCandidate* candidates, int candidateTotal, const TimelineChildKey* key, int repeatLength)
+{
+    int index;
+
+    if (!candidates || !key || repeatLength <= 0)
     {
         return;
     }
 
-    profile->backgroundChildren[profile->backgroundChildTotal++] = *key;
+    index = FindBackgroundCandidate(candidates, candidateTotal, key);
+
+    if (index >= 0 && repeatLength > candidates[index].maxRepeat)
+    {
+        candidates[index].maxRepeat = repeatLength;
+    }
+}
+
+static UINT_PTR MixProfileChildValue(UINT_PTR value)
+{
+    value += (UINT_PTR)0x9E3779B97F4A7C15ULL;
+    value ^= value >> 30;
+    value *= (UINT_PTR)0xBF58476D1CE4E5B9ULL;
+    value ^= value >> 27;
+    value *= (UINT_PTR)0x94D049BB133111EBULL;
+    value ^= value >> 31;
+    return value;
+}
+
+static TimelineProfile* ReserveTimelineProfile(const void* definition)
+{
+    TimelineProfile* profile;
+    size_t index;
+
+    if (g_timelineProfileUsed < TIMELINE_PROFILE_CACHE_CAPACITY)
+    {
+        profile = &g_timelineProfiles[g_timelineProfileUsed++];
+        memset(profile, 0, sizeof(*profile));
+        return profile;
+    }
+
+    index = ((UINT_PTR)definition >> 4) % TIMELINE_PROFILE_CACHE_CAPACITY;
+    profile = &g_timelineProfiles[index];
+    ReleaseTimelineProfile(profile);
+    return profile;
+}
+
+#define TIMELINE_PROFILE_STAGE_NON_TEXTURE_ART 1
+#define TIMELINE_PROFILE_STAGE_TEXTURE_COMMON_INIT 2
+#define TIMELINE_PROFILE_STAGE_TEXTURE_COMMON 3
+#define TIMELINE_PROFILE_STAGE_TEXTURE_SCAN 4
+#define TIMELINE_PROFILE_STAGE_TEXTURE_VALIDITY 5
+
+typedef struct TimelineProfileBuildState
+{
+    TimelineChildKey previousSoleKey;
+    UINT_PTR previousSignature;
+    UINT_PTR previousSignature2;
+    int previousSpecificTotal;
+    int candidateTotal;
+    int hasPreviousSole;
+    int repeatLength;
+} TimelineProfileBuildState;
+
+static TimelineBackgroundCandidate* GetTimelineBuildCandidates(TimelineProfileBuildState* state)
+{
+    return state ? (TimelineBackgroundCandidate*)(state + 1) : NULL;
+}
+
+static int InitializeTextureProfileArrays(TimelineProfile* profile)
+{
+    int frameExtent;
+
+    if (!profile || profile->frameExtent <= 0)
+    {
+        return 0;
+    }
+
+    frameExtent = profile->frameExtent;
+    profile->backgroundChildren = (TimelineChildKey*)HeapAlloc(GetProcessHeap(), 0, (size_t)frameExtent * sizeof(*profile->backgroundChildren));
+    profile->soleSpecificKeys = (TimelineChildKey*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)frameExtent * sizeof(*profile->soleSpecificKeys));
+    profile->backgroundFirstFrames = (unsigned char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)frameExtent * sizeof(*profile->backgroundFirstFrames));
+    profile->specificChildTotals = (unsigned short*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)frameExtent * sizeof(*profile->specificChildTotals));
+    profile->renderedChildTotals = (unsigned short*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)frameExtent * sizeof(*profile->renderedChildTotals));
+    profile->frameFingerprintFirst = (UINT_PTR*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)frameExtent * sizeof(*profile->frameFingerprintFirst));
+    profile->frameFingerprintSecond = (UINT_PTR*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)frameExtent * sizeof(*profile->frameFingerprintSecond));
+
+    return profile->backgroundChildren && profile->soleSpecificKeys && profile->backgroundFirstFrames && profile->specificChildTotals && profile->renderedChildTotals && profile->frameFingerprintFirst && profile->frameFingerprintSecond;
+}
+
+static int AdvanceTimelineProfile(TimelineProfile* profile, uint8_t* entry, void* movieClip, AppearanceField field)
+{
+    TimelineProfileBuildState* state;
+    TimelineBackgroundCandidate* candidates;
+    TimelineChildKey childKey;
+    TimelineChildKey soleKey;
+    void** children;
+    int candidateIndex;
+    int childIndex;
+    int childTotal;
+    int commonIndex;
+    int currentFrame;
+    int frame;
+    int renderedTotal;
+    int specificTotal;
+    UINT_PTR childValue;
+    UINT_PTR frameSignature;
+    UINT_PTR frameSignature2;
+
+    if (!profile || !movieClip || profile->buildComplete)
+    {
+        return profile && profile->buildComplete ? 1 : -1;
+    }
+
+    state = (TimelineProfileBuildState*)profile->buildState;
+
+    if (!state || !IsReadableMemoryRange(movieClip, MOVIECLIP_CURRENT_FRAME_OFFSET + sizeof(int)))
+    {
+        return -1;
+    }
+
+    candidates = GetTimelineBuildCandidates(state);
+    currentFrame = *(const int*)((uint8_t*)movieClip + MOVIECLIP_CURRENT_FRAME_OFFSET);
+
+    while (!profile->buildComplete)
+    {
+        if (profile->buildStage == TIMELINE_PROFILE_STAGE_NON_TEXTURE_ART)
+        {
+            while (profile->buildCursor < profile->frameExtent && ConsumeTimelineProfileProbeBudget())
+            {
+                frame = profile->buildCursor++;
+                SetMovieClipFrameForInspection(movieClip, frame);
+
+                if (!GetMovieClipChildren(movieClip, &children, &childTotal))
+                {
+                    SetMovieClipFrameForInspection(movieClip, currentFrame);
+                    RefreshGraphicsEntryChildren(entry);
+                    return -1;
+                }
+
+                frameSignature = (UINT_PTR)1469598103934665603ULL;
+                frameSignature2 = 0;
+                specificTotal = 0;
+
+                for (childIndex = 0; childIndex < childTotal; ++childIndex)
+                {
+                    if (!IsTimelineChildRenderableFast(children[childIndex]) || !ReadTimelineChildKeyFast(children[childIndex], &childKey))
+                    {
+                        continue;
+                    }
+
+                    if (TimelineChildKeyArrayContains(profile->commonChildren, profile->commonChildTotal, &childKey) || TimelineChildIsNamedHelper(entry, children[childIndex]) || TimelineChildIsNamedHelperDirect(children[childIndex]))
+                    {
+                        RememberTimelineHelperKey(profile, &childKey);
+                        continue;
+                    }
+
+                    childValue = ((UINT_PTR)childKey.characterID << 16) | (UINT_PTR)childKey.libraryID;
+                    childValue ^= (UINT_PTR)(unsigned int)childIndex << 40;
+                    childValue ^= (UINT_PTR)(unsigned char)*((const unsigned char*)children[childIndex] + DISPLAY_OBJECT_RENDER_FLAGS_OFFSET) << 8;
+                    childValue ^= (UINT_PTR)(unsigned int)*(const int*)((const uint8_t*)children[childIndex] + DISPLAY_OBJECT_CLIP_DEPTH_OFFSET);
+                    childValue = MixProfileChildValue(childValue);
+                    frameSignature ^= childValue;
+                    frameSignature *= (UINT_PTR)1099511628211ULL;
+                    frameSignature2 += childValue * (childValue | 1U);
+                    ++specificTotal;
+                }
+
+                if (specificTotal > 0 && (frame == 0 || specificTotal != state->previousSpecificTotal || frameSignature != state->previousSignature || frameSignature2 != state->previousSignature2))
+                {
+                    profile->distinctArtFrames[frame] = 1;
+                }
+
+                state->previousSpecificTotal = specificTotal;
+                state->previousSignature = frameSignature;
+                state->previousSignature2 = frameSignature2;
+            }
+
+            SetMovieClipFrameForInspection(movieClip, currentFrame);
+            RefreshGraphicsEntryChildren(entry);
+
+            if (profile->buildCursor >= profile->frameExtent)
+            {
+                profile->buildComplete = 1;
+                HeapFree(GetProcessHeap(), 0, profile->buildState);
+                profile->buildState = NULL;
+                g_timelineVisualNeedsRefresh = 1;
+                return 1;
+            }
+
+            return 0;
+        }
+
+        if (profile->buildStage == TIMELINE_PROFILE_STAGE_TEXTURE_COMMON_INIT)
+        {
+            if (!ConsumeTimelineProfileProbeBudget())
+            {
+                return 0;
+            }
+
+            SetMovieClipFrameForInspection(movieClip, 0);
+
+            if (!GetMovieClipChildren(movieClip, &children, &childTotal))
+            {
+                SetMovieClipFrameForInspection(movieClip, currentFrame);
+                return -1;
+            }
+
+            profile->commonChildTotal = 0;
+
+            if (childTotal > 0)
+            {
+                profile->commonChildren = (TimelineChildKey*)HeapAlloc(GetProcessHeap(), 0, (size_t)childTotal * sizeof(*profile->commonChildren));
+                
+                if (!profile->commonChildren)
+                {
+                    SetMovieClipFrameForInspection(movieClip, currentFrame);
+                    return -1;
+                }
+
+                for (childIndex = 0; childIndex < childTotal; ++childIndex)
+                {
+                    if (!ReadTimelineChildKeyFast(children[childIndex], &childKey) || TimelineChildKeyArrayContains(profile->commonChildren, profile->commonChildTotal, &childKey))
+                    {
+                        continue;
+                    }
+
+                    profile->commonChildren[profile->commonChildTotal++] = childKey;
+                }
+            }
+
+            profile->buildCursor = 1;
+            profile->buildStage = TIMELINE_PROFILE_STAGE_TEXTURE_COMMON;
+        }
+
+        if (profile->buildStage == TIMELINE_PROFILE_STAGE_TEXTURE_COMMON)
+        {
+            while (profile->buildCursor < profile->frameExtent && profile->commonChildTotal > 0 && ConsumeTimelineProfileProbeBudget())
+            {
+                frame = profile->buildCursor++;
+                SetMovieClipFrameForInspection(movieClip, frame);
+
+                if (!GetMovieClipChildren(movieClip, &children, &childTotal))
+                {
+                    SetMovieClipFrameForInspection(movieClip, currentFrame);
+                    return -1;
+                }
+
+                for (commonIndex = profile->commonChildTotal - 1; commonIndex >= 0; --commonIndex)
+                {
+                    if (!TimelineChildrenContainKey(children, childTotal, &profile->commonChildren[commonIndex]))
+                    {
+                        --profile->commonChildTotal;
+                        profile->commonChildren[commonIndex] = profile->commonChildren[profile->commonChildTotal];
+                    }
+                }
+            }
+
+            if (profile->commonChildTotal > 0 && profile->buildCursor < profile->frameExtent)
+            {
+                SetMovieClipFrameForInspection(movieClip, currentFrame);
+                return 0;
+            }
+
+            if (!InitializeTextureProfileArrays(profile))
+            {
+                SetMovieClipFrameForInspection(movieClip, currentFrame);
+                return -1;
+            }
+
+            profile->buildCursor = 0;
+            profile->buildStage = TIMELINE_PROFILE_STAGE_TEXTURE_SCAN;
+            state->candidateTotal = 0;
+            state->hasPreviousSole = 0;
+            state->repeatLength = 0;
+            memset(&state->previousSoleKey, 0, sizeof(state->previousSoleKey));
+        }
+
+        if (profile->buildStage == TIMELINE_PROFILE_STAGE_TEXTURE_SCAN)
+        {
+            while (profile->buildCursor < profile->frameExtent && ConsumeTimelineProfileProbeBudget())
+            {
+                frame = profile->buildCursor++;
+                SetMovieClipFrameForInspection(movieClip, frame);
+
+                if (!GetMovieClipChildren(movieClip, &children, &childTotal))
+                {
+                    SetMovieClipFrameForInspection(movieClip, currentFrame);
+                    return -1;
+                }
+
+                frameSignature = (UINT_PTR)1469598103934665603ULL;
+                frameSignature2 = 0;
+                renderedTotal = 0;
+                specificTotal = 0;
+                memset(&soleKey, 0, sizeof(soleKey));
+
+                for (childIndex = 0; childIndex < childTotal; ++childIndex)
+                {
+                    if (!IsTimelineChildRenderableFast(children[childIndex]) || !ReadTimelineChildKeyFast(children[childIndex], &childKey))
+                    {
+                        continue;
+                    }
+
+                    ++renderedTotal;
+
+                    if (TimelineChildKeyArrayContains(profile->commonChildren, profile->commonChildTotal, &childKey))
+                    {
+                        continue;
+                    }
+
+                    /* 
+                    * Texture validity is about the art contributed by this
+                    * timeline, not persistent/common display-list children...
+                    * Keep fingerprint order-independent so same
+                    * shared filler symbols can be recognized across body,
+                    * head, leg, tail, and ear texture definitions...
+                    */
+                    childValue = ((UINT_PTR)childKey.characterID << 16) | (UINT_PTR)childKey.libraryID;
+                    childValue = MixProfileChildValue(childValue);
+                    frameSignature += childValue;
+                    frameSignature2 += childValue * (childValue | 1U);
+                    soleKey = childKey;
+                    ++specificTotal;
+                }
+
+                profile->frameFingerprintFirst[frame] = frameSignature;
+                profile->frameFingerprintSecond[frame] = frameSignature2;
+                profile->renderedChildTotals[frame] = (unsigned short)(renderedTotal > 0xFFFF ? 0xFFFF : renderedTotal);
+                profile->specificChildTotals[frame] = (unsigned short)(specificTotal > 0xFFFF ? 0xFFFF : specificTotal);
+
+                if (specificTotal == 1)
+                {
+                    profile->soleSpecificKeys[frame] = soleKey;
+                    candidateIndex = EnsureBackgroundCandidate(candidates, &state->candidateTotal, profile->frameExtent, &soleKey, frame);
+                    (void)candidateIndex;
+
+                    if (state->hasPreviousSole && TimelineChildKeyEquals(&state->previousSoleKey, &soleKey))
+                    {
+                        ++state->repeatLength;
+                    }
+                    else
+                    {
+                        if (state->hasPreviousSole)
+                        {
+                            FinishBackgroundRun(candidates, state->candidateTotal, &state->previousSoleKey, state->repeatLength);
+                        }
+
+                        state->previousSoleKey = soleKey;
+                        state->hasPreviousSole = 1;
+                        state->repeatLength = 1;
+                    }
+                }
+                else
+                {
+                    if (state->hasPreviousSole)
+                    {
+                        FinishBackgroundRun(candidates, state->candidateTotal, &state->previousSoleKey, state->repeatLength);
+                    }
+
+                    state->hasPreviousSole = 0;
+                    state->repeatLength = 0;
+                }
+            }
+
+            if (profile->buildCursor < profile->frameExtent)
+            {
+                SetMovieClipFrameForInspection(movieClip, currentFrame);
+                return 0;
+            }
+
+            if (state->hasPreviousSole)
+            {
+                FinishBackgroundRun(candidates, state->candidateTotal, &state->previousSoleKey, state->repeatLength);
+            }
+
+            for (candidateIndex = 0; candidateIndex < state->candidateTotal; ++candidateIndex)
+            {
+                if (candidates[candidateIndex].maxRepeat >= TIMELINE_BACKGROUND_REPEAT_LENGTH)
+                {
+                    profile->backgroundChildren[profile->backgroundChildTotal++] = candidates[candidateIndex].key;
+                    
+                    if (candidates[candidateIndex].firstFrame >= 0 && candidates[candidateIndex].firstFrame < profile->frameExtent)
+                    {
+                        profile->backgroundFirstFrames[candidates[candidateIndex].firstFrame] = 1;
+                    }
+                }
+            }
+
+            profile->buildCursor = 0;
+            profile->buildStage = TIMELINE_PROFILE_STAGE_TEXTURE_VALIDITY;
+        }
+
+        if (profile->buildStage == TIMELINE_PROFILE_STAGE_TEXTURE_VALIDITY)
+        {
+            while (profile->buildCursor < profile->frameExtent && ConsumeTimelineProfileProbeBudget())
+            {
+                frame = profile->buildCursor++;
+                SetMovieClipFrameForInspection(movieClip, frame);
+
+                if (!GetMovieClipChildren(movieClip, &children, &childTotal))
+                {
+                    SetMovieClipFrameForInspection(movieClip, currentFrame);
+                    return -1;
+                }
+
+                for (childIndex = 0; childIndex < childTotal; ++childIndex)
+                {
+                    if (!IsTimelineChildRenderableFast(children[childIndex]) || !ReadTimelineChildKeyFast(children[childIndex], &childKey))
+                    {
+                        continue;
+                    }
+
+                    if (TimelineChildKeyArrayContains(profile->commonChildren, profile->commonChildTotal, &childKey))
+                    {
+                        continue;
+                    }
+
+                    if (TimelineChildKeyArrayContains(profile->backgroundChildren, profile->backgroundChildTotal, &childKey) && !profile->backgroundFirstFrames[frame])
+                    {
+                        continue;
+                    }
+
+                    profile->distinctArtFrames[frame] = 1;
+                    break;
+                }
+            }
+
+            SetMovieClipFrameForInspection(movieClip, currentFrame);
+
+            if (profile->buildCursor < profile->frameExtent)
+            {
+                return 0;
+            }
+
+            profile->buildComplete = 1;
+            HeapFree(GetProcessHeap(), 0, profile->buildState);
+            profile->buildState = NULL;
+            return 1;
+        }
+
+        SetMovieClipFrameForInspection(movieClip, currentFrame);
+        return -1;
+    }
+
+    SetMovieClipFrameForInspection(movieClip, currentFrame);
+    return 1;
 }
 
 static TimelineProfile* GetTimelineProfile(uint8_t* entry, void* movieClip, AppearanceField field)
 {
-    TimelineChildKey* commonChildren;
-    TimelineChildKey childKey;
-    TimelineChildKey previousSoleKey;
-    TimelineChildKey soleKey;
+    TimelineProfileBuildState* state;
     TimelineProfile* profile;
-    void** children;
     void* definition;
+    size_t buildStateSize;
     size_t index;
-    int backgroundIndex;
-    int childIndex;
-    int childTotal;
-    int commonIndex;
-    int commonTotal;
-    int currentFrame;
-    int frame;
+    int advanceResult;
     int frameExtent;
-    int hasPreviousSole;
     int learnBackgroundChildren;
-    int readable;
-    int repeatLength;
-    int specificTotal;
-    int previousSpecificTotal;
-    UINT_PTR childValue;
-    UINT_PTR frameSignature;
-    UINT_PTR frameSignature2;
-    UINT_PTR previousSignature;
-    UINT_PTR previousSignature2;
 
     learnBackgroundChildren = field == APPEARANCE_FIELD_TEXTURE;
     frameExtent = GetMovieClipFrameExtent(movieClip);
@@ -581,261 +1422,71 @@ static TimelineProfile* GetTimelineProfile(uint8_t* entry, void* movieClip, Appe
 
         if (profile->definition == definition && profile->frameExtent == frameExtent && profile->learnsBackgroundChildren == learnBackgroundChildren)
         {
+            if (!profile->buildComplete)
+            {
+                advanceResult = AdvanceTimelineProfile(profile, entry, movieClip, field);
+
+                if (advanceResult < 0)
+                {
+                    ReleaseTimelineProfile(profile);
+                    return NULL;
+                }
+            }
+
             return profile;
         }
     }
 
-    currentFrame = *(const int*)((uint8_t*)movieClip + MOVIECLIP_CURRENT_FRAME_OFFSET);
-    SetMovieClipFrameForInspection(movieClip, 0);
-
-    if (!GetMovieClipChildren(movieClip, &children, &childTotal))
-    {
-        SetMovieClipFrameForInspection(movieClip, currentFrame);
-        return NULL;
-    }
-
-    commonChildren = NULL;
-    commonTotal = 0;
-
-    if (childTotal > 0)
-    {
-        commonChildren = (TimelineChildKey*)HeapAlloc(GetProcessHeap(), 0, (size_t)childTotal * sizeof(*commonChildren));
-
-        if (!commonChildren)
-        {
-            SetMovieClipFrameForInspection(movieClip, currentFrame);
-            return NULL;
-        }
-
-        for (childIndex = 0; childIndex < childTotal; ++childIndex)
-        {
-            if (!ReadTimelineChildKey(children[childIndex], &childKey))
-            {
-                continue;
-            }
-
-            readable = 1;
-
-            for (commonIndex = 0; commonIndex < commonTotal; ++commonIndex)
-            {
-                if (TimelineChildKeyEquals(&commonChildren[commonIndex], &childKey))
-                {
-                    readable = 0;
-                    break;
-                }
-            }
-
-            if (readable)
-            {
-                commonChildren[commonTotal++] = childKey;
-            }
-        }
-    }
-
-    readable = 1;
-
-    for (frame = 1; frame < frameExtent && commonTotal > 0; ++frame)
-    {
-        SetMovieClipFrameForInspection(movieClip, frame);
-
-        if (!GetMovieClipChildren(movieClip, &children, &childTotal))
-        {
-            readable = 0;
-            break;
-        }
-
-        for (commonIndex = commonTotal - 1; commonIndex >= 0; --commonIndex)
-        {
-            if (!TimelineChildrenContainKey(children, childTotal, &commonChildren[commonIndex]))
-            {
-                --commonTotal;
-                commonChildren[commonIndex] = commonChildren[commonTotal];
-            }
-        }
-    }
-
-    SetMovieClipFrameForInspection(movieClip, currentFrame);
-
-    if (!readable)
-    {
-        if (commonChildren)
-        {
-            HeapFree(GetProcessHeap(), 0, commonChildren);
-        }
-
-        return NULL;
-    }
-
-    if (g_timelineProfileUsed < TIMELINE_PROFILE_CACHE_CAPACITY)
-    {
-        profile = &g_timelineProfiles[g_timelineProfileUsed++];
-    }
-    else
-    {
-        index = ((UINT_PTR)definition >> 4) % TIMELINE_PROFILE_CACHE_CAPACITY;
-        profile = &g_timelineProfiles[index];
-        ReleaseTimelineProfile(profile);
-    }
-
+    profile = ReserveTimelineProfile(definition);
     profile->definition = definition;
-    profile->commonChildren = commonChildren;
     profile->frameExtent = frameExtent;
-    profile->commonChildTotal = commonTotal;
     profile->learnsBackgroundChildren = learnBackgroundChildren;
+    profile->distinctArtFrames = (unsigned char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)frameExtent * sizeof(*profile->distinctArtFrames));
+
+    if (!profile->distinctArtFrames)
+    {
+        ReleaseTimelineProfile(profile);
+        return NULL;
+    }
+
+    buildStateSize = sizeof(TimelineProfileBuildState);
 
     if (learnBackgroundChildren)
     {
-        if ((size_t)frameExtent > (size_t)-1 / sizeof(*profile->backgroundChildren))
+        if ((size_t)frameExtent > ((size_t)-1 - buildStateSize) / sizeof(TimelineBackgroundCandidate))
         {
             ReleaseTimelineProfile(profile);
             return NULL;
         }
 
-        profile->backgroundChildren = (TimelineChildKey*)HeapAlloc(GetProcessHeap(), 0, (size_t)frameExtent * sizeof(*profile->backgroundChildren));
-        profile->backgroundFirstFrames = (unsigned char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)frameExtent * sizeof(*profile->backgroundFirstFrames));
-        
-        if (!profile->backgroundChildren || !profile->backgroundFirstFrames)
-        {
-            ReleaseTimelineProfile(profile);
-            return NULL;
-        }
-
-        hasPreviousSole = 0;
-        repeatLength = 0;
-        memset(&previousSoleKey, 0, sizeof(previousSoleKey));
-
-        for (frame = 0; frame < frameExtent; ++frame)
-        {
-            SetMovieClipFrameForInspection(movieClip, frame);
-
-            if (!GetMovieClipChildren(movieClip, &children, &childTotal))
-            {
-                SetMovieClipFrameForInspection(movieClip, currentFrame);
-                ReleaseTimelineProfile(profile);
-                return NULL;
-            }
-
-            if (FindSoleTimelineSpecificChild(children, childTotal, profile, &soleKey))
-            {
-                if (hasPreviousSole && TimelineChildKeyEquals(&previousSoleKey, &soleKey))
-                {
-                    ++repeatLength;
-                }
-                else
-                {
-                    if (hasPreviousSole)
-                    {
-                        RememberRepeatedTimelineChild(profile, &previousSoleKey, repeatLength);
-                    }
-
-                    previousSoleKey = soleKey;
-                    hasPreviousSole = 1;
-                    repeatLength = 1;
-                }
-            }
-            else
-            {
-                if (hasPreviousSole)
-                {
-                    RememberRepeatedTimelineChild(profile, &previousSoleKey, repeatLength);
-                }
-
-                hasPreviousSole = 0;
-                repeatLength = 0;
-            }
-        }
-
-        if (hasPreviousSole)
-        {
-            RememberRepeatedTimelineChild(profile, &previousSoleKey, repeatLength);
-        }
-
-        // Keep only the first authored occurrence of each learned background symbol...
-        for (backgroundIndex = 0; backgroundIndex < profile->backgroundChildTotal; ++backgroundIndex)
-        {
-            for (frame = 0; frame < frameExtent; ++frame)
-            {
-                SetMovieClipFrameForInspection(movieClip, frame);
-
-                if (!GetMovieClipChildren(movieClip, &children, &childTotal))
-                {
-                    SetMovieClipFrameForInspection(movieClip, currentFrame);
-                    ReleaseTimelineProfile(profile);
-                    return NULL;
-                }
-
-                if (FindSoleTimelineSpecificChild(children, childTotal, profile, &soleKey) && TimelineChildKeyEquals(&soleKey, &profile->backgroundChildren[backgroundIndex]))
-                {
-                    profile->backgroundFirstFrames[frame] = 1;
-                    break;
-                }
-            }
-        }
-
-        SetMovieClipFrameForInspection(movieClip, currentFrame);
+        buildStateSize += (size_t)frameExtent * sizeof(TimelineBackgroundCandidate);
     }
-    else
+
+    state = (TimelineProfileBuildState*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, buildStateSize);
+
+    if (!state)
     {
-        profile->distinctArtFrames = (unsigned char*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, (size_t)frameExtent * sizeof(*profile->distinctArtFrames));
-        
-        if (!profile->distinctArtFrames)
-        {
-            ReleaseTimelineProfile(profile);
-            return NULL;
-        }
+        ReleaseTimelineProfile(profile);
+        return NULL;
+    }
 
-        previousSignature = 0;
-        previousSignature2 = 0;
-        previousSpecificTotal = 0;
+    profile->buildState = state;
+    profile->buildCursor = 0;
 
-        for (frame = 0; frame < frameExtent; ++frame)
-        {
-            SetMovieClipFrameForInspection(movieClip, frame);
-            RefreshGraphicsEntryChildren(entry);
+    if (!learnBackgroundChildren)
+    {
+        InitializeTimelineHelperKeys(profile, movieClip);
+    }
 
-            if (!GetMovieClipChildren(movieClip, &children, &childTotal))
-            {
-                SetMovieClipFrameForInspection(movieClip, currentFrame);
-                RefreshGraphicsEntryChildren(entry);
-                ReleaseTimelineProfile(profile);
-                return NULL;
-            }
+    profile->buildStage = learnBackgroundChildren ? TIMELINE_PROFILE_STAGE_TEXTURE_COMMON_INIT : TIMELINE_PROFILE_STAGE_NON_TEXTURE_ART;
+    profile->buildComplete = 0;
 
-            frameSignature = (UINT_PTR)1469598103934665603ULL;
-            frameSignature2 = 0;
-            specificTotal = 0;
+    advanceResult = AdvanceTimelineProfile(profile, entry, movieClip, field);
 
-            for (childIndex = 0; childIndex < childTotal; ++childIndex)
-            {
-                if (!IsTimelineChildRenderable(children[childIndex]) || TimelineChildIsNamedHelper(entry, children[childIndex]) || !ReadTimelineChildKey(children[childIndex], &childKey))
-                {
-                    continue;
-                }
-
-                childValue = ((UINT_PTR)childKey.characterID << 16) | (UINT_PTR)childKey.libraryID;
-                childValue += (UINT_PTR)0x9E3779B97F4A7C15ULL;
-                childValue ^= childValue >> 30;
-                childValue *= (UINT_PTR)0xBF58476D1CE4E5B9ULL;
-                childValue ^= childValue >> 27;
-                childValue *= (UINT_PTR)0x94D049BB133111EBULL;
-                childValue ^= childValue >> 31;
-                frameSignature += childValue;
-                frameSignature2 += childValue * (childValue | 1);
-                ++specificTotal;
-            }
-
-            if (specificTotal > 0 && (frame == 0 || specificTotal != previousSpecificTotal || frameSignature != previousSignature || frameSignature2 != previousSignature2))
-            {
-                profile->distinctArtFrames[frame] = 1;
-            }
-
-            previousSpecificTotal = specificTotal;
-            previousSignature = frameSignature;
-            previousSignature2 = frameSignature2;
-        }
-
-        SetMovieClipFrameForInspection(movieClip, currentFrame);
-        RefreshGraphicsEntryChildren(entry);
+    if (advanceResult < 0)
+    {
+        ReleaseTimelineProfile(profile);
+        return NULL;
     }
 
     return profile;
@@ -846,14 +1497,215 @@ static int TimelineChildIsNamedHelper(const uint8_t* entry, const void* child)
     return entry && child && (child == *(void* const*)(entry + CATPART_GRAPHICS_TEXTURE_CLIP_OFFSET) || child == *(void* const*)(entry + CATPART_GRAPHICS_SCARS_CLIP_OFFSET) || child == *(void* const*)(entry + CATPART_GRAPHICS_AUX_CLIP_OFFSET));
 }
 
+static int FieldHasRenderedTextureFamily(AppearanceField field, size_t* outContainerOffset)
+{
+    size_t containerOffsets[TIMELINE_CONTAINER_CAPACITY];
+    size_t containerTotal;
+
+    containerTotal = GetTimelineContainerOffsets(field, containerOffsets);
+
+    if (containerTotal != 1 || !McpfTextureKindForContainer(containerOffsets[0]))
+    {
+        return 0;
+    }
+
+    if (outContainerOffset)
+    {
+        *outContainerOffset = containerOffsets[0];
+    }
+
+    return 1;
+}
+
+/*
+* The ordinary texture map only sees nested tex MovieClips belonging to
+* the currently equipped body parts. MCPF can attach a different private
+* texture definition to a newly added part frame, so merely indexing the
+* randomized starting cat leaves modded definitions undiscovered...
+*
+* During the initialization screen, walk every valid outer part frame for the
+* rendered texture families (body/head/tail/leg/ear), resolve that frame's
+* live tex child, let MCPF synchronize it, and fully build immutable texture profile...
+*/
+int AdvanceAllPartTextureIndexes(void* catVisual, int* outPercent)
+{
+    TimelineIDMap* partMap;
+    TimelineProfile* textureProfile;
+    const char* textureKind;
+    AppearanceField field;
+    size_t containerOffset;
+    uint8_t* entries;
+    uint8_t* entry;
+    void* partMovieClip;
+    void* textureMovieClip;
+    int candidateBudget;
+    int currentFrame;
+    int entryTotal;
+    int maximum;
+    int partID;
+
+    if (outPercent)
+    {
+        *outPercent = 100;
+    }
+
+    if (!catVisual)
+    {
+        return 1;
+    }
+
+    if (!g_initialPartTextureIndex.targetsReady)
+    {
+        g_initialPartTextureIndex.targetTotal = 0;
+
+        for (field = APPEARANCE_FIELD_BODY; field < APPEARANCE_FIELD_COUNT; ++field)
+        {
+            if (!FieldHasRenderedTextureFamily(field, NULL))
+            {
+                continue;
+            }
+
+            maximum = GetFieldTimelineExtent(catVisual, field);
+
+            if (maximum < 1)
+            {
+                continue;
+            }
+
+            partMap = GetTimelineIDMap(catVisual, field, 1, maximum);
+
+            if (partMap && partMap->building)
+            {
+                if (outPercent)
+                {
+                    *outPercent = 0;
+                }
+                
+                return 0;
+            }
+
+            if (partMap && partMap->validTotal > 0)
+            {
+                g_initialPartTextureIndex.targetTotal += partMap->validTotal;
+            }
+        }
+
+        g_initialPartTextureIndex.targetsReady = 1;
+        g_initialPartTextureIndex.field = APPEARANCE_FIELD_BODY;
+        g_initialPartTextureIndex.validIndex = 0;
+        g_initialPartTextureIndex.completedTotal = 0;
+    }
+
+    if (g_initialPartTextureIndex.targetTotal <= 0)
+    {
+        return 1;
+    }
+
+    candidateBudget = TIMELINE_INITIAL_TEXTURE_DISCOVERY_BUDGET_PER_FRAME;
+
+    while (g_initialPartTextureIndex.field < APPEARANCE_FIELD_COUNT && candidateBudget > 0)
+    {
+        field = g_initialPartTextureIndex.field;
+
+        if (!FieldHasRenderedTextureFamily(field, &containerOffset))
+        {
+            ++g_initialPartTextureIndex.field;
+            g_initialPartTextureIndex.validIndex = 0;
+            continue;
+        }
+
+        maximum = GetFieldTimelineExtent(catVisual, field);
+        partMap = maximum >= 1 ? GetTimelineIDMap(catVisual, field, 1, maximum) : NULL;
+
+        if (!partMap || partMap->building || partMap->validTotal <= 0)
+        {
+            ++g_initialPartTextureIndex.field;
+            g_initialPartTextureIndex.validIndex = 0;
+            continue;
+        }
+
+        if (g_initialPartTextureIndex.validIndex >= partMap->validTotal)
+        {
+            ++g_initialPartTextureIndex.field;
+            g_initialPartTextureIndex.validIndex = 0;
+            continue;
+        }
+
+        if (!GetGraphicsEntries(catVisual, containerOffset, &entries, &entryTotal) || entryTotal <= 0)
+        {
+            ++g_initialPartTextureIndex.validIndex;
+            ++g_initialPartTextureIndex.completedTotal;
+            --candidateBudget;
+            continue;
+        }
+
+        entry = entries;
+        partMovieClip = *(void**)(entry + CATPART_GRAPHICS_MOVIECLIP_OFFSET);
+
+        if (!partMovieClip || !IsReadableMemoryRange(partMovieClip, MOVIECLIP_CURRENT_FRAME_OFFSET + sizeof(int)))
+        {
+            ++g_initialPartTextureIndex.validIndex;
+            ++g_initialPartTextureIndex.completedTotal;
+            --candidateBudget;
+            continue;
+        }
+
+        partID = partMap->validIDs[g_initialPartTextureIndex.validIndex];
+        currentFrame = *(const int*)((uint8_t*)partMovieClip + MOVIECLIP_CURRENT_FRAME_OFFSET);
+        SetMovieClipFrameForInspection(partMovieClip, partID - 1);
+
+        textureMovieClip = GetMovieClipNamedChild(partMovieClip, "tex");
+        textureProfile = NULL;
+
+        if (textureMovieClip)
+        {
+            textureKind = McpfTextureKindForContainer(containerOffset);
+
+            if (textureKind)
+            {
+                // MCPF appends/synchronizes modded texture frames on demand...
+                SyncMcpfTextureClip(textureKind, textureMovieClip);
+            }
+
+            textureProfile = GetTimelineProfile(NULL, textureMovieClip, APPEARANCE_FIELD_TEXTURE);
+        }
+
+        SetMovieClipFrameForInspection(partMovieClip, currentFrame);
+        RefreshGraphicsEntryChildren(entry);
+
+        // Profile probing is time-sliced. Stay on this part frame until its nested texture definition is completely indexed...
+        if (textureProfile && !textureProfile->buildComplete)
+        {
+            if (outPercent)
+            {
+                *outPercent = (g_initialPartTextureIndex.completedTotal * 100) / g_initialPartTextureIndex.targetTotal;
+            }
+
+            return 0;
+        }
+
+        ++g_initialPartTextureIndex.validIndex;
+        ++g_initialPartTextureIndex.completedTotal;
+        --candidateBudget;
+    }
+
+    if (outPercent)
+    {
+        *outPercent = (g_initialPartTextureIndex.completedTotal * 100) / g_initialPartTextureIndex.targetTotal;
+
+        if (*outPercent > 100)
+        {
+            *outPercent = 100;
+        }
+    }
+
+    return g_initialPartTextureIndex.field >= APPEARANCE_FIELD_COUNT;
+}
+
 static int TimelineFrameHasSpecificContent(uint8_t* entry, void* movieClip, AppearanceField field, int oneBasedFrame, int* outHasRenderableContent)
 {
-    TimelineChildKey childKey;
     TimelineProfile* profile;
-    void** children;
-    int childIndex;
-    int childTotal;
-    int currentFrame;
+    int frameIndex;
     int specific;
 
     if (outHasRenderableContent)
@@ -865,72 +1717,32 @@ static int TimelineFrameHasSpecificContent(uint8_t* entry, void* movieClip, Appe
 
     if (field != APPEARANCE_FIELD_TEXTURE)
     {
-        // (Profile construction seeks the outer part through every frame)...
-        RefreshGraphicsEntryChildren(entry);
+        /* 
+        * Profile construction seeks the outer part through its authored
+        * frames. The live visual needs one real CatVisual refresh after the
+        * profiling pass, but candidate-ID checks themselves are pure array lookups...
+        */
         g_timelineVisualNeedsRefresh = 1;
     }
 
-    if (!profile || oneBasedFrame < 1 || oneBasedFrame > profile->frameExtent)
+    if (!profile || !profile->buildComplete || oneBasedFrame < 1 || oneBasedFrame > profile->frameExtent || !profile->distinctArtFrames)
     {
         return 0;
     }
 
-    if (field != APPEARANCE_FIELD_TEXTURE)
-    {
-        specific = profile->distinctArtFrames && profile->distinctArtFrames[oneBasedFrame - 1];
+    frameIndex = oneBasedFrame - 1;
+    specific = profile->distinctArtFrames[frameIndex] != 0;
 
-        if (outHasRenderableContent)
+    if (outHasRenderableContent)
+    {
+        if (field == APPEARANCE_FIELD_TEXTURE && profile->specificChildTotals)
+        {
+            *outHasRenderableContent = profile->specificChildTotals[frameIndex] != 0;
+        }
+        else
         {
             *outHasRenderableContent = specific;
         }
-
-        return specific;
-    }
-
-    currentFrame = *(const int*)((uint8_t*)movieClip + MOVIECLIP_CURRENT_FRAME_OFFSET);
-    SetMovieClipFrameForInspection(movieClip, oneBasedFrame - 1);
-
-    if (field != APPEARANCE_FIELD_TEXTURE)
-    {
-        RefreshGraphicsEntryChildren(entry);
-    }
-
-    specific = 0;
-
-    if (GetMovieClipChildren(movieClip, &children, &childTotal))
-    {
-        for (childIndex = 0; childIndex < childTotal && !specific; ++childIndex)
-        {
-            if (!IsTimelineChildRenderable(children[childIndex]) || !ReadTimelineChildKey(children[childIndex], &childKey))
-            {
-                continue;
-            }
-
-            if (TimelineChildKeyArrayContains(profile->commonChildren, profile->commonChildTotal, &childKey))
-            {
-                continue;
-            }
-
-            if (outHasRenderableContent)
-            {
-                *outHasRenderableContent = 1;
-            }
-
-            if (TimelineChildKeyArrayContains(profile->backgroundChildren, profile->backgroundChildTotal, &childKey) && (!profile->backgroundFirstFrames || !profile->backgroundFirstFrames[oneBasedFrame - 1]))
-            {
-                continue;
-            }
-
-            specific = 1;
-        }
-    }
-
-    SetMovieClipFrameForInspection(movieClip, currentFrame);
-
-    if (field != APPEARANCE_FIELD_TEXTURE)
-    {
-        RefreshGraphicsEntryChildren(entry);
-        g_timelineVisualNeedsRefresh = 1;
     }
 
     return specific;
@@ -947,13 +1759,12 @@ static int IsFieldTimelineFrameValid(void* catVisual, AppearanceField field, int
     int entryTotal;
     int eligibleTimelineTotal;
     int frameExtent;
-    int hasRenderableContent;
-    int specificTimelineTotal;
+    int textureArtTimelineTotal;
     int valid;
 
     containerTotal = GetTimelineContainerOffsets(field, containerOffsets);
     eligibleTimelineTotal = 0;
-    specificTimelineTotal = 0;
+    textureArtTimelineTotal = 0;
 
     for (containerIndex = 0; containerIndex < containerTotal; ++containerIndex)
     {
@@ -971,6 +1782,16 @@ static int IsFieldTimelineFrameValid(void* catVisual, AppearanceField field, int
             continue;
         }
 
+        /* 
+        * Eye/brow/mouth containers are part of the generic texture sync
+        * list, but MCPF only cares about texture art for the applicable five rendered cat
+        * texture families (body, head, tail, leg, and ear)...
+        */
+        if (field == APPEARANCE_FIELD_TEXTURE && TextureKindMaskForContainer(containerOffsets[containerIndex]) == 0)
+        {
+            continue;
+        }
+
         ++eligibleTimelineTotal;
 
         if (oneBasedFrame < 1 || oneBasedFrame > frameExtent)
@@ -983,19 +1804,19 @@ static int IsFieldTimelineFrameValid(void* catVisual, AppearanceField field, int
             continue;
         }
 
-        hasRenderableContent = 0;
-        valid = TimelineFrameHasSpecificContent(entry, movieClip, field, oneBasedFrame, &hasRenderableContent);
+        valid = TimelineFrameHasSpecificContent(entry, movieClip, field, oneBasedFrame, NULL);
 
         if (field == APPEARANCE_FIELD_TEXTURE)
         {
-            if (!hasRenderableContent)
-            {
-                return 0;
-            }
-
+            /* 
+            * Neutral/background contribution is
+            * not a failure! Several legitimate vanilla textures intentionally
+            * leave one or more families on their learned neutral state. Count only genuinely distinct art here and
+            * let the "all-family fingerprint logic" decide repeated/filler IDs...
+            */
             if (valid)
             {
-                ++specificTimelineTotal;
+                ++textureArtTimelineTotal;
             }
 
             continue;
@@ -1007,10 +1828,10 @@ static int IsFieldTimelineFrameValid(void* catVisual, AppearanceField field, int
         }
     }
 
-    return field == APPEARANCE_FIELD_TEXTURE && eligibleTimelineTotal > 0 && specificTimelineTotal > 0;
+    return field == APPEARANCE_FIELD_TEXTURE && eligibleTimelineTotal > 0 && textureArtTimelineTotal > 0;
 }
 
-static UINT_PTR GetTimelineIdMapSignature(void* catVisual, AppearanceField field)
+static UINT_PTR GetTimelineIDMapSignature(void* catVisual, AppearanceField field)
 {
     size_t containerOffsets[TIMELINE_CONTAINER_CAPACITY];
     size_t containerIndex;
@@ -1075,39 +1896,42 @@ static UINT_PTR MixTimelineFingerprintValue(UINT_PTR value)
     return value;
 }
 
-static int GetTextureTimelineFingerprint(void* catVisual, int oneBasedFrame, TimelineFrameFingerprint* outFingerprint)
+typedef struct TimelineProfileRef
 {
-    TimelineChildKey childKey;
+    TimelineProfile* profile;
+    size_t containerOffset;
+} TimelineProfileRef;
+
+static int CollectTimelineProfileRefs(void* catVisual, AppearanceField field, TimelineProfileRef refs[TIMELINE_CONTAINER_CAPACITY], int* outRefTotal, int* outPending)
+{
     size_t containerOffsets[TIMELINE_CONTAINER_CAPACITY];
     size_t containerIndex;
     size_t containerTotal;
     uint8_t* entries;
     uint8_t* entry;
-    void** children;
     void* movieClip;
-    UINT_PTR first;
-    UINT_PTR second;
-    UINT_PTR value;
-    int childIndex;
-    int childTotal;
-    int currentFrame;
+    TimelineProfile* profile;
     int entryTotal;
-    int frameExtent;
-    int renderedChildTotal;
-    int timelineTotal;
+    int refTotal;
 
-    if (!catVisual || !outFingerprint || oneBasedFrame < 1)
+    if (outRefTotal)
+    {
+        *outRefTotal = 0;
+    }
+    if (outPending)
+    {
+        *outPending = 0;
+    }
+
+    if (!catVisual || !refs || !outRefTotal || !outPending)
     {
         return 0;
     }
 
-    first = (UINT_PTR)1469598103934665603ULL;
-    second = 0;
-    renderedChildTotal = 0;
-    timelineTotal = 0;
-    containerTotal = GetTimelineContainerOffsets(APPEARANCE_FIELD_TEXTURE, containerOffsets);
+    containerTotal = GetTimelineContainerOffsets(field, containerOffsets);
+    refTotal = 0;
 
-    for (containerIndex = 0; containerIndex < containerTotal; ++containerIndex)
+    for (containerIndex = 0; containerIndex < containerTotal && refTotal < TIMELINE_CONTAINER_CAPACITY; ++containerIndex)
     {
         if (!GetGraphicsEntries(catVisual, containerOffsets[containerIndex], &entries, &entryTotal))
         {
@@ -1115,64 +1939,288 @@ static int GetTextureTimelineFingerprint(void* catVisual, int oneBasedFrame, Tim
         }
 
         entry = entries;
-        movieClip = GetTimelineEntryClip(entry, APPEARANCE_FIELD_TEXTURE);
-        frameExtent = GetMovieClipFrameExtent(movieClip);
+        movieClip = GetTimelineEntryClip(entry, field);
 
-        if (frameExtent <= 0)
+        if (!movieClip)
         {
             continue;
         }
-        if (oneBasedFrame > frameExtent || !IsReadableMemoryRange((uint8_t*)movieClip + MOVIECLIP_CURRENT_FRAME_OFFSET, sizeof(int)))
+
+        profile = GetTimelineProfile(entry, movieClip, field);
+
+        if (!profile || profile->frameExtent <= 0 || !profile->distinctArtFrames)
+        {
+            continue;
+        }
+
+        if (!profile->buildComplete)
+        {
+            *outPending = 1;
+            continue;
+        }
+
+        refs[refTotal].profile = profile;
+        refs[refTotal].containerOffset = containerOffsets[containerIndex];
+
+        ++refTotal;
+    }
+
+    *outRefTotal = refTotal;
+    return refTotal > 0;
+}
+
+static int GetTextureFingerprintFromProfiles(const TimelineProfileRef* refs, int refTotal, int oneBasedFrame, TimelineFrameFingerprint* outFingerprint)
+{
+    const TimelineProfile* profile;
+    UINT_PTR first;
+    UINT_PTR second;
+    UINT_PTR value;
+    int frameIndex;
+    int includedTimelineTotal;
+    int refIndex;
+    int specificChildTotal;
+
+    if (!refs || refTotal <= 0 || oneBasedFrame < 1 || !outFingerprint)
+    {
+        return 0;
+    }
+
+    first = (UINT_PTR)1469598103934665603ULL;
+    second = 0;
+    includedTimelineTotal = 0;
+    specificChildTotal = 0;
+    frameIndex = oneBasedFrame - 1;
+
+    for (refIndex = 0; refIndex < refTotal; ++refIndex)
+    {
+        if (TextureKindMaskForContainer(refs[refIndex].containerOffset) == 0)
+        {
+            continue;
+        }
+
+        profile = refs[refIndex].profile;
+
+        /* 
+        * Repeated-art comparison follows the same all-body-parts contract as
+        * texture validity. A candidate is not fingerprintable if even one
+        * active rendered texture clip does not reach it...
+        */
+        if (!profile || oneBasedFrame > profile->frameExtent || !profile->frameFingerprintFirst || !profile->frameFingerprintSecond || !profile->specificChildTotals)
         {
             return 0;
         }
 
-        currentFrame = *(const int*)((uint8_t*)movieClip + MOVIECLIP_CURRENT_FRAME_OFFSET);
-        SetMovieClipFrameForInspection(movieClip, oneBasedFrame - 1);
-
-        if (!GetMovieClipChildren(movieClip, &children, &childTotal))
-        {
-            SetMovieClipFrameForInspection(movieClip, currentFrame);
-            return 0;
-        }
-
-        value = MixTimelineFingerprintValue((UINT_PTR)containerOffsets[containerIndex] ^ ((UINT_PTR)timelineTotal << 32));
+        value = MixTimelineFingerprintValue((UINT_PTR)refs[refIndex].containerOffset ^ ((UINT_PTR)refIndex << 32));
         first ^= value;
         first *= (UINT_PTR)1099511628211ULL;
         second += value * (value | 1U);
-        ++timelineTotal;
 
-        for (childIndex = 0; childIndex < childTotal; ++childIndex)
-        {
-            if (!IsTimelineChildRenderable(children[childIndex]) || !ReadTimelineChildKey(children[childIndex], &childKey))
-            {
-                continue;
-            }
+        value = MixTimelineFingerprintValue(profile->frameFingerprintFirst[frameIndex] ^ ((UINT_PTR)refIndex << 48));
+        first ^= value;
+        first *= (UINT_PTR)1099511628211ULL;
+        second += value * (value | 1U);
 
-            value = ((UINT_PTR)childKey.characterID << 16) | (UINT_PTR)childKey.libraryID;
-            value ^= (UINT_PTR)(unsigned int)childIndex << 40;
-            value ^= (UINT_PTR)(unsigned char)*((const unsigned char*)children[childIndex] + DISPLAY_OBJECT_RENDER_FLAGS_OFFSET) << 8;
-            value ^= (UINT_PTR)(unsigned int)*(const int*)((const uint8_t*)children[childIndex] + DISPLAY_OBJECT_CLIP_DEPTH_OFFSET);
-            value = MixTimelineFingerprintValue(value ^ ((UINT_PTR)containerIndex << 48));
-            first ^= value;
-            first *= (UINT_PTR)1099511628211ULL;
-            second += value * (value | 1U);
-            ++renderedChildTotal;
-        }
-
-        SetMovieClipFrameForInspection(movieClip, currentFrame);
+        value = MixTimelineFingerprintValue(profile->frameFingerprintSecond[frameIndex] ^ ((UINT_PTR)refs[refIndex].containerOffset << 16));
+        first ^= value;
+        first *= (UINT_PTR)1099511628211ULL;
+        second += value * (value | 1U);
+        specificChildTotal += profile->specificChildTotals[frameIndex];
+        ++includedTimelineTotal;
     }
 
-    if (timelineTotal <= 0)
+    if (includedTimelineTotal <= 0)
     {
         return 0;
     }
 
     outFingerprint->first = first;
     outFingerprint->second = second;
-    outFingerprint->childTotal = renderedChildTotal;
-    outFingerprint->timelineTotal = timelineTotal;
+    outFingerprint->childTotal = specificChildTotal;
+    outFingerprint->timelineTotal = includedTimelineTotal;
     return 1;
+}
+
+static int GetTextureProfileFrameFingerprint(const TimelineProfile* profile, int frameIndex, TimelineFrameFingerprint* outFingerprint)
+{
+    if (!profile || !outFingerprint || frameIndex < 0 || frameIndex >= profile->frameExtent || !profile->frameFingerprintFirst || !profile->frameFingerprintSecond || !profile->specificChildTotals)
+    {
+        return 0;
+    }
+
+    outFingerprint->first = profile->frameFingerprintFirst[frameIndex];
+    outFingerprint->second = profile->frameFingerprintSecond[frameIndex];
+    outFingerprint->childTotal = profile->specificChildTotals[frameIndex];
+    outFingerprint->timelineTotal = 1;
+    return 1;
+}
+
+static int TimelineFrameContentFingerprintEquals(const TimelineFrameFingerprint* first, const TimelineFrameFingerprint* second)
+{
+    return first && second && first->first == second->first && first->second == second->second && first->childTotal == second->childTotal;
+}
+
+static int CollectSharedTextureBackgrounds(const TimelineProfileRef* refs, int refTotal, TimelineFrameFingerprint backgrounds[TIMELINE_CONTAINER_CAPACITY], int* outFirstOneBasedFrame)
+{
+    TimelineFrameFingerprint candidate;
+    TimelineFrameFingerprint current;
+    unsigned int matchingKindMask;
+    int candidateFrame;
+    int commonExtent;
+    int foundRequiredRef;
+    int refIndex;
+    int refMatches;
+    const TimelineProfile* profile;
+
+    if (outFirstOneBasedFrame)
+    {
+        *outFirstOneBasedFrame = 0;
+    }
+
+    if (!refs || refTotal <= 0 || !backgrounds)
+    {
+        return 0;
+    }
+
+    /* 
+    * Search the frame range shared by every rendered texture family. The
+    * vanilla invalid fallback is the same tiny two-child display-list state
+    * in body/head/tail/leg/ear. Requiring that exact cross-family match is a
+    * stronger signal than requiring it to remain the final frame, so a
+    * mod may safely append real textures immediately after the fallback...
+    */
+    commonExtent = 0;
+    foundRequiredRef = 0;
+
+    for (refIndex = 0; refIndex < refTotal; ++refIndex)
+    {
+        if (TextureKindMaskForContainer(refs[refIndex].containerOffset) == 0)
+        {
+            continue;
+        }
+
+        profile = refs[refIndex].profile;
+
+        if (!profile || !profile->buildComplete || profile->frameExtent <= 0)
+        {
+            return 0;
+        }
+
+        if (!foundRequiredRef || profile->frameExtent < commonExtent)
+        {
+            commonExtent = profile->frameExtent;
+        }
+
+        foundRequiredRef = 1;
+    }
+
+    if (!foundRequiredRef || commonExtent <= 0)
+    {
+        return 0;
+    }
+
+    for (candidateFrame = commonExtent - 1; candidateFrame >= 0; --candidateFrame)
+    {
+        int haveCandidate;
+
+        haveCandidate = 0;
+        matchingKindMask = 0;
+        refMatches = 1;
+        memset(&candidate, 0, sizeof(candidate));
+
+        for (refIndex = 0; refIndex < refTotal; ++refIndex)
+        {
+            unsigned int kindMask;
+
+            kindMask = TextureKindMaskForContainer(refs[refIndex].containerOffset);
+
+            if (kindMask == 0)
+            {
+                continue;
+            }
+
+            profile = refs[refIndex].profile;
+            
+            if (!GetTextureProfileFrameFingerprint(profile, candidateFrame, &current) || current.childTotal != TIMELINE_SHARED_TEXTURE_BACKGROUND_CHILDREN)
+            {
+                refMatches = 0;
+                break;
+            }
+
+            if (!haveCandidate)
+            {
+                candidate = current;
+                haveCandidate = 1;
+            }
+            else if (!TimelineFrameContentFingerprintEquals(&candidate, &current))
+            {
+                refMatches = 0;
+                break;
+            }
+
+            matchingKindMask |= kindMask;
+        }
+
+        if (refMatches && haveCandidate && (matchingKindMask & TIMELINE_TEXTURE_KIND_ALL_MASK) == TIMELINE_TEXTURE_KIND_ALL_MASK)
+        {
+            backgrounds[0] = candidate;
+
+            if (outFirstOneBasedFrame)
+            {
+                *outFirstOneBasedFrame = candidateFrame + 1;
+            }
+
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+static int FindTrailingTextureGarbageStart(const TimelineProfileRef* refs, int refTotal, int sharedBackgroundOneBasedFrame)
+{
+    TimelineFrameFingerprint current;
+    TimelineFrameFingerprint previous;
+    int earliestGarbage;
+    int runEnd;
+    int runLength;
+    int runStart;
+
+    if (!refs || refTotal <= 0 || sharedBackgroundOneBasedFrame <= 1)
+    {
+        return sharedBackgroundOneBasedFrame;
+    }
+
+    /* 
+    * The malformed vanilla tail is staged in held multi-child runs directly
+    * before the shared fallback (body begins first, then tail/leg/ear join).
+    * Treat these contiguous bulk runs as one garbage region. Stop as soon as
+    * the preceding run is simple/neutral so long-lived legitimate overlays
+    * elsewhere in the texture table are not swallowed...
+    */
+    earliestGarbage = sharedBackgroundOneBasedFrame;
+    runEnd = sharedBackgroundOneBasedFrame - 1;
+
+    while (runEnd >= 1 && GetTextureFingerprintFromProfiles(refs, refTotal, runEnd, &current))
+    {
+        runStart = runEnd;
+
+        while (runStart > 1 && GetTextureFingerprintFromProfiles(refs, refTotal, runStart - 1, &previous) && TimelineFrameFingerprintEquals(&current, &previous))
+        {
+            --runStart;
+        }
+
+        runLength = runEnd - runStart + 1;
+
+        if (runLength < 2 || current.childTotal < TIMELINE_TRAILING_TEXTURE_GARBAGE_MIN_CHILDREN)
+        {
+            break;
+        }
+
+        earliestGarbage = runStart;
+        runEnd = runStart - 1;
+    }
+
+    return earliestGarbage;
 }
 
 static int TimelineFrameFingerprintEquals(const TimelineFrameFingerprint* first, const TimelineFrameFingerprint* second)
@@ -1184,11 +2232,22 @@ TimelineIDMap* GetTimelineIDMap(void* catVisual, AppearanceField field, int mini
 {
     TimelineFrameFingerprint currentFingerprint;
     TimelineFrameFingerprint previousFingerprint;
+    TimelineFrameFingerprint sharedTrailingBackgrounds[TIMELINE_CONTAINER_CAPACITY];
+    TimelineProfileRef refs[TIMELINE_CONTAINER_CAPACITY];
+    TimelineProfile* profile;
     TimelineIDMap* map;
     UINT_PTR signature;
     size_t candidateTotal;
     int candidate;
+    int frameIndex;
     int hasPreviousTextureFingerprint;
+    int pendingProfiles;
+    int refIndex;
+    int refTotal;
+    int sameMap;
+    int sharedTrailingBackgroundFrame;
+    int sharedTrailingBackgroundTotal;
+    int trailingTextureGarbageStart;
     int timelineValid;
 
     if (!catVisual || field < 0 || field >= APPEARANCE_FIELD_COUNT || maximum < minimum)
@@ -1196,51 +2255,158 @@ TimelineIDMap* GetTimelineIDMap(void* catVisual, AppearanceField field, int mini
         return NULL;
     }
 
-    signature = GetTimelineIdMapSignature(catVisual, field);
+    signature = GetTimelineIDMapSignature(catVisual, field);
+
     if (!signature)
     {
         return NULL;
     }
 
     map = &g_timelineIDMaps[field];
+    sameMap = map->catVisual == catVisual && map->signature == signature && map->minimum == minimum && map->maximum == maximum;
 
-    if (map->catVisual == catVisual && map->signature == signature && map->minimum == minimum && map->maximum == maximum)
+    if (sameMap && !map->building)
     {
         return map;
     }
 
-    ReleaseTimelineIdMap(map);
-    map->catVisual = catVisual;
-    map->signature = signature;
-    map->minimum = minimum;
-    map->maximum = maximum;
+    if (!sameMap)
+    {
+        ReleaseTimelineIdMap(map);
+        map->catVisual = catVisual;
+        map->signature = signature;
+        map->minimum = minimum;
+        map->maximum = maximum;
+        map->building = 1;
 
-    candidateTotal = (size_t)maximum - (size_t)minimum + 1;
+        candidateTotal = (size_t)maximum - (size_t)minimum + 1;
 
-    if (candidateTotal > (size_t)-1 / sizeof(*map->validIDs))
+        if (candidateTotal > (size_t)-1 / sizeof(*map->validIDs))
+        {
+            map->building = 0;
+            return map;
+        }
+
+        map->validIDs = (int*)HeapAlloc(GetProcessHeap(), 0, candidateTotal * sizeof(*map->validIDs));
+
+        if (!map->validIDs)
+        {
+            map->building = 0;
+            return map;
+        }
+    }
+
+    /*
+    * Profile construction is intentionally time-sliced. Each editor frame
+    * receives a fixed number of MovieClip probes shared by the centralized
+    * pre-render indexing pass. Until the relevant immutable definitions have finished 
+    * indexing, return a map marked building instead of blocking the render thread...
+    */
+    pendingProfiles = 0;
+    refTotal = 0;
+    CollectTimelineProfileRefs(catVisual, field, refs, &refTotal, &pendingProfiles);
+
+    if (pendingProfiles)
+    {
+        map->building = 1;
+        return map;
+    }
+
+    map->validTotal = 0;
+    map->building = 0;
+
+    if (refTotal <= 0)
     {
         return map;
     }
 
-    map->validIDs = (int*)HeapAlloc(GetProcessHeap(), 0, candidateTotal * sizeof(*map->validIDs));
-
-    if (!map->validIDs)
-    {
-        return map;
-    }
-
+    /* 
+    * Once the profiles are complete, candidate-map construction is entirely
+    * memory-only! There are no MovieClip seeks, native child-name lookups, or
+    * VirtualQuery calls...
+    */
     hasPreviousTextureFingerprint = 0;
     memset(&previousFingerprint, 0, sizeof(previousFingerprint));
-    candidate = minimum;
+    sharedTrailingBackgroundFrame = 0;
+    sharedTrailingBackgroundTotal = field == APPEARANCE_FIELD_TEXTURE ? CollectSharedTextureBackgrounds(refs, refTotal, sharedTrailingBackgrounds, &sharedTrailingBackgroundFrame) : 0;
+    trailingTextureGarbageStart = (field == APPEARANCE_FIELD_TEXTURE && sharedTrailingBackgroundTotal > 0) ? FindTrailingTextureGarbageStart(refs, refTotal, sharedTrailingBackgroundFrame) : 0;
 
-    for (;;)
+    for (candidate = minimum;; ++candidate)
     {
-        timelineValid = IsFieldTimelineFrameValid(catVisual, field, candidate);
+        frameIndex = candidate - 1;
+        timelineValid = 0;
+
+        if (field == APPEARANCE_FIELD_TEXTURE)
+        {
+            int requiredTextureTimelineTotal;
+            int textureArtTimelineTotal;
+
+            requiredTextureTimelineTotal = 0;
+            textureArtTimelineTotal = 0;
+            timelineValid = 1;
+
+            for (refIndex = 0; refIndex < refTotal; ++refIndex)
+            {
+                if (TextureKindMaskForContainer(refs[refIndex].containerOffset) == 0)
+                {
+                    continue;
+                }
+
+                ++requiredTextureTimelineTotal;
+                profile = refs[refIndex].profile;
+
+                /* 
+                * Every rendered body-part texture timeline must contribute an
+                * authored texture state at this ID. That state may be a
+                * reused/neutral marker, so do not require a distinct
+                * frame change here. What is invalid is a genuinely empty frame!
+                */
+                if (!profile || candidate < 1 || candidate > profile->frameExtent || !profile->distinctArtFrames || !profile->specificChildTotals || profile->specificChildTotals[frameIndex] == 0)
+                {
+                    timelineValid = 0;
+                    break;
+                }
+
+                ++textureArtTimelineTotal;
+            }
+
+            if (requiredTextureTimelineTotal <= 0 || textureArtTimelineTotal <= 0)
+            {
+                timelineValid = 0;
+            }
+
+            /* 
+            * Reject the learned malformed trailing cluster, but do not apply per-family repeat
+            * vetoes. A valid texture may deliberately reuse one family's art while other families change...
+            */
+            if (timelineValid && trailingTextureGarbageStart > 0 && candidate >= trailingTextureGarbageStart && candidate <= sharedTrailingBackgroundFrame)
+            {
+                timelineValid = 0;
+            }
+        }
+        else
+        {
+            for (refIndex = 0; refIndex < refTotal; ++refIndex)
+            {
+                profile = refs[refIndex].profile;
+
+                if (!profile || candidate < 1 || candidate > profile->frameExtent || !profile->distinctArtFrames)
+                {
+                    continue;
+                }
+
+                if (profile->distinctArtFrames[frameIndex])
+                {
+                    timelineValid = 1;
+                    break;
+                }
+            }
+        }
+
         if (timelineValid && field == APPEARANCE_FIELD_TEXTURE)
         {
-            if (GetTextureTimelineFingerprint(catVisual, candidate, &currentFingerprint))
+            if (GetTextureFingerprintFromProfiles(refs, refTotal, candidate, &currentFingerprint))
             {
-                // Multi-child held ranges are repeated artwork too..
                 if (hasPreviousTextureFingerprint && TimelineFrameFingerprintEquals(&currentFingerprint, &previousFingerprint))
                 {
                     timelineValid = 0;
@@ -1268,8 +2434,6 @@ TimelineIDMap* GetTimelineIDMap(void* catVisual, AppearanceField field, int mini
         {
             break;
         }
-
-        ++candidate;
     }
 
     return map;

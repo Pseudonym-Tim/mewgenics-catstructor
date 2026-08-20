@@ -4,7 +4,169 @@
 * Editor widgets, appearance controls, scene rendering stuff... 
 */
 
-static void SetLockedEditorWindowGeometry(void)
+static void RefreshEditorCatVisual(void* catVisual, uint8_t* parts);
+
+#define INITIAL_INDEXING_VISUAL_PART_TOTAL 14
+
+typedef struct InitialIndexingVisualSnapshot
+{
+    int partIDs[INITIAL_INDEXING_VISUAL_PART_TOTAL];
+    int textures[INITIAL_INDEXING_VISUAL_PART_TOTAL];
+    int palette;
+    int arm1Claws;
+    int arm2Claws;
+    int captured;
+} InitialIndexingVisualSnapshot;
+
+static const size_t g_initialIndexingPartIDOffsets[INITIAL_INDEXING_VISUAL_PART_TOTAL] =
+{
+    CATPART_BODY_ID_OFFSET, CATPART_HEAD_ID_OFFSET, CATPART_TAIL_ID_OFFSET, CATPART_LEG1_ID_OFFSET, CATPART_LEG2_ID_OFFSET,
+    CATPART_ARM1_ID_OFFSET, CATPART_ARM2_ID_OFFSET, CATPART_LEFTEYE_ID_OFFSET, CATPART_RIGHTEYE_ID_OFFSET,
+    CATPART_LEFTEYEBROW_ID_OFFSET, CATPART_RIGHTEYEBROW_ID_OFFSET, CATPART_LEFTEAR_ID_OFFSET, CATPART_RIGHTEAR_ID_OFFSET,
+    CATPART_MOUTH_ID_OFFSET
+};
+
+static const size_t g_initialIndexingTextureOffsets[INITIAL_INDEXING_VISUAL_PART_TOTAL] =
+{
+    CATPART_BODY_TEXTURE_OFFSET, CATPART_HEAD_TEXTURE_OFFSET, CATPART_TAIL_TEXTURE_OFFSET, CATPART_LEG1_TEXTURE_OFFSET, CATPART_LEG2_TEXTURE_OFFSET,
+    CATPART_ARM1_TEXTURE_OFFSET, CATPART_ARM2_TEXTURE_OFFSET, CATPART_LEFTEYE_TEXTURE_OFFSET, CATPART_RIGHTEYE_TEXTURE_OFFSET,
+    CATPART_LEFTEYEBROW_TEXTURE_OFFSET, CATPART_RIGHTEYEBROW_TEXTURE_OFFSET, CATPART_LEFTEAR_TEXTURE_OFFSET, CATPART_RIGHTEAR_TEXTURE_OFFSET,
+    CATPART_MOUTH_TEXTURE_OFFSET
+};
+
+static InitialIndexingVisualSnapshot g_initialIndexingVisualSnapshot;
+
+static int g_presetSkipBlankValues[APPEARANCE_FIELD_COUNT];
+static unsigned char g_presetSkipBlankActive[APPEARANCE_FIELD_COUNT];
+
+static void ClearPresetSkipBlankBypass(void)
+{
+    memset(g_presetSkipBlankValues, 0, sizeof(g_presetSkipBlankValues));
+    memset(g_presetSkipBlankActive, 0, sizeof(g_presetSkipBlankActive));
+}
+
+static int PreservePresetLoadedValue(AppearanceField field, int value)
+{
+    if (field < 0 || field >= APPEARANCE_FIELD_COUNT || !g_presetSkipBlankActive[field])
+    {
+        return 0;
+    }
+
+    /* 
+    * Exemption belongs to the exact value supplied by the preset.
+    * Any editor/symmetry/randomization change retires it permanently, so a
+    * later coincidental return to that numeric ID cannot bypass the user's skip setting...
+    */
+    if (g_presetSkipBlankValues[field] != value)
+    {
+        g_presetSkipBlankActive[field] = 0;
+        return 0;
+    }
+
+    return 1;
+}
+
+static void PreservePresetLoadedAppearance(const AppearanceSnapshot* appearance, unsigned int loadedMask)
+{
+    int values[APPEARANCE_FIELD_COUNT];
+    AppearanceField field;
+
+    if (!appearance)
+    {
+        ClearPresetSkipBlankBypass();
+        return;
+    }
+
+    values[APPEARANCE_FIELD_TEXTURE] = appearance->texture;
+    values[APPEARANCE_FIELD_PALETTE] = appearance->palette;
+    values[APPEARANCE_FIELD_BODY] = appearance->body;
+    values[APPEARANCE_FIELD_HEAD] = appearance->head;
+    values[APPEARANCE_FIELD_TAIL] = appearance->tail;
+    values[APPEARANCE_FIELD_LEG1] = appearance->leg1;
+    values[APPEARANCE_FIELD_LEG2] = appearance->leg2;
+    values[APPEARANCE_FIELD_ARM1] = appearance->arm1;
+    values[APPEARANCE_FIELD_ARM2] = appearance->arm2;
+    values[APPEARANCE_FIELD_LEFTEYE] = appearance->lefteye;
+    values[APPEARANCE_FIELD_RIGHTEYE] = appearance->righteye;
+    values[APPEARANCE_FIELD_LEFTEYEBROW] = appearance->lefteyebrow;
+    values[APPEARANCE_FIELD_RIGHTEYEBROW] = appearance->righteyebrow;
+    values[APPEARANCE_FIELD_LEFTEAR] = appearance->leftear;
+    values[APPEARANCE_FIELD_RIGHTEAR] = appearance->rightear;
+    values[APPEARANCE_FIELD_MOUTH] = appearance->mouth;
+
+    ClearPresetSkipBlankBypass();
+
+    for (field = APPEARANCE_FIELD_TEXTURE; field < APPEARANCE_FIELD_COUNT; ++field)
+    {
+        if ((loadedMask & (1U << (unsigned int)field)) == 0)
+        {
+            continue;
+        }
+
+        g_presetSkipBlankValues[field] = values[field];
+        g_presetSkipBlankActive[field] = 1;
+    }
+}
+
+void ResetInitialIndexingAppearanceSnapshot(void)
+{
+    memset(&g_initialIndexingVisualSnapshot, 0, sizeof(g_initialIndexingVisualSnapshot));
+}
+
+int CaptureInitialIndexingAppearance(const uint8_t* parts)
+{
+    int index;
+
+    if (!parts)
+    {
+        return 0;
+    }
+
+    /* 
+    * The first capture is authoritative for the whole initialization pass!
+    * Later frames can call this defensively...
+    */
+    if (g_initialIndexingVisualSnapshot.captured)
+    {
+        return 1;
+    }
+
+    for (index = 0; index < INITIAL_INDEXING_VISUAL_PART_TOTAL; ++index)
+    {
+        g_initialIndexingVisualSnapshot.partIDs[index] = *(const int*)(parts + g_initialIndexingPartIDOffsets[index]);
+        g_initialIndexingVisualSnapshot.textures[index] = *(const int*)(parts + g_initialIndexingTextureOffsets[index]);
+    }
+
+    g_initialIndexingVisualSnapshot.palette = *(const int*)(parts + CATPART_PALETTE_OFFSET);
+    g_initialIndexingVisualSnapshot.arm1Claws = *(const int*)(parts + CATPART_ARM1_CLAWS_OFFSET);
+    g_initialIndexingVisualSnapshot.arm2Claws = *(const int*)(parts + CATPART_ARM2_CLAWS_OFFSET);
+    g_initialIndexingVisualSnapshot.captured = 1;
+    return 1;
+}
+
+static int RestoreInitialIndexingAppearance(uint8_t* parts)
+{
+    int index;
+
+    if (!parts || !g_initialIndexingVisualSnapshot.captured)
+    {
+        return 0;
+    }
+
+    for (index = 0; index < INITIAL_INDEXING_VISUAL_PART_TOTAL; ++index)
+    {
+        *(int*)(parts + g_initialIndexingPartIDOffsets[index]) = g_initialIndexingVisualSnapshot.partIDs[index];
+        *(int*)(parts + g_initialIndexingTextureOffsets[index]) = g_initialIndexingVisualSnapshot.textures[index];
+    }
+
+    *(int*)(parts + CATPART_PALETTE_OFFSET) = g_initialIndexingVisualSnapshot.palette;
+    *(int*)(parts + CATPART_ARM1_CLAWS_OFFSET) = g_initialIndexingVisualSnapshot.arm1Claws;
+    *(int*)(parts + CATPART_ARM2_CLAWS_OFFSET) = g_initialIndexingVisualSnapshot.arm2Claws;
+
+    return 1;
+}
+
+static void SetLockedEditorWindowGeometry(int autoFitHeight)
 {
     uint8_t* context;
 
@@ -15,14 +177,17 @@ static void SetLockedEditorWindowGeometry(void)
         return;
     }
 
-    /* 
-    * Keep the controls wholly inside the left half of a 1280x720 stage (FLA/SWF resolution)...
+    /*
+    * Keep the controls wholly inside the left half of a 1280x720 stage (FLA/SWF resolution).
+    * During initial indexing, keep the normal locked width but pass a zero Y size so ImGui
+    * auto-fits only the window height to the status text and progress bar. Once indexing has
+    * finished, restore the editor's normal fixed height...
     */
     *(int*)(context + IMGUI_NEXT_WINDOW_FLAGS_OFFSET) |= IMGUI_NEXT_WINDOW_HAS_POS | IMGUI_NEXT_WINDOW_HAS_SIZE;
     *(float*)(context + IMGUI_NEXT_WINDOW_POS_OFFSET) = DEBUG_WINDOW_LOCKED_X;
     *(float*)(context + IMGUI_NEXT_WINDOW_POS_OFFSET + sizeof(float)) = DEBUG_WINDOW_LOCKED_Y;
     *(float*)(context + IMGUI_NEXT_WINDOW_SIZE_OFFSET) = DEBUG_WINDOW_LOCKED_WIDTH;
-    *(float*)(context + IMGUI_NEXT_WINDOW_SIZE_OFFSET + sizeof(float)) = DEBUG_WINDOW_LOCKED_HEIGHT;
+    *(float*)(context + IMGUI_NEXT_WINDOW_SIZE_OFFSET + sizeof(float)) = autoFitHeight ? 0.0f : DEBUG_WINDOW_LOCKED_HEIGHT;
     *(int*)(context + IMGUI_NEXT_WINDOW_POS_COND_OFFSET) = IMGUI_COND_ALWAYS;
     *(int*)(context + IMGUI_NEXT_WINDOW_SIZE_COND_OFFSET) = IMGUI_COND_ALWAYS;
 }
@@ -217,6 +382,181 @@ static int SliderInt(const char* label, int* value, int minimum, int maximum, co
 
     *value = roundedValue;
 
+    return 1;
+}
+
+static int AdvanceTimelineIndexes(void* catVisual, int* outPercent)
+{
+    TimelineIDMap* map;
+    AppearanceField field;
+    int completeTotal;
+    int maximum;
+    int timelineTotal;
+
+    if (outPercent)
+    {
+        *outPercent = 100;
+    }
+
+    /* 
+    * A missing visual is handled by the normal fallback controls. Don't
+    * turn that transient state into a loading screen that can never finish... 
+    */
+    if (!catVisual)
+    {
+        return 1;
+    }
+
+    completeTotal = 0;
+    timelineTotal = 0;
+
+    /* 
+    * Build every blank-art navigation map before the editor controls are
+    * exposed. This is independent of section/dropdown visibility, so
+    * collapsed sections can't prevent timelines from indexing...
+    */
+    for (field = APPEARANCE_FIELD_TEXTURE; field < APPEARANCE_FIELD_COUNT; ++field)
+    {
+        if (!FieldSkipsBlankFrames(field))
+        {
+            continue;
+        }
+
+        maximum = GetFieldTimelineExtent(catVisual, field);
+
+        if (maximum < 1)
+        {
+            continue;
+        }
+
+        ++timelineTotal;
+        map = GetTimelineIDMap(catVisual, field, 1, maximum);
+
+        /* 
+        * A missing map/signature means this field has no usable live
+        * timeline to index. Treat it as unavailable instead of hanging the
+        * editor forever at less than 100 percent...
+        */
+        if (!map || !map->building)
+        {
+            ++completeTotal;
+        }
+    }
+
+    if (outPercent)
+    {
+        if (timelineTotal <= 0)
+        {
+            *outPercent = 100;
+        }
+        else
+        {
+            *outPercent = (completeTotal * 100) / timelineTotal;
+        }
+    }
+
+    return timelineTotal <= 0 || completeTotal >= timelineTotal;
+}
+
+static int AdvanceInitialTimelineIndexes(void* catVisual, int* outPercent)
+{
+    int mapPercent;
+    int texturePercent;
+    int mapsReady;
+    int texturesReady;
+
+    mapPercent = 0;
+    texturePercent = 0;
+    mapsReady = AdvanceTimelineIndexes(catVisual, &mapPercent);
+
+    /* 
+    * Reserve the first 20% for the ordinary part/texture maps. The remaining
+    * 80% or whatever represents the pass across every selectable part frame
+    * and its MCPF-synchronized nested texture definition...
+    */
+    if (!mapsReady || g_timelineVisualNeedsRefresh)
+    {
+        if (outPercent)
+        {
+            *outPercent = mapPercent / 5;
+        }
+
+        return 0;
+    }
+
+    texturesReady = AdvanceAllPartTextureIndexes(catVisual, &texturePercent);
+
+    if (outPercent)
+    {
+        *outPercent = 20 + (texturePercent * 80) / 100;
+
+        if (*outPercent > 100)
+        {
+            *outPercent = 100;
+        }
+    }
+
+    return texturesReady;
+}
+
+static void DrawTimelineIndexingState(int percent)
+{
+    char status[96];
+    float automaticSize[2];
+    int progressValue;
+
+    if (percent < 0)
+    {
+        percent = 0;
+    }
+    else if (percent > 100)
+    {
+        percent = 100;
+    }
+
+    automaticSize[0] = 0.0f;
+    automaticSize[1] = 0.0f;
+    snprintf(status, sizeof(status), "Loading editor, please wait... %d%%##timeline_index_status", percent);
+    g_imguiSelectable(status, false, 0, automaticSize);
+
+    progressValue = percent;
+    SetNextItemWidth(DEBUG_WINDOW_LOCKED_WIDTH - 40.0f);
+    SliderInt("##timeline_index_progress", &progressValue, 0, 100, "%.0f%%");
+
+    g_imguiSelectable("Indexing appearance timelines, including modded entries!##timeline_index_explanation", false, 0, automaticSize);
+}
+
+static int RestoreInitialStrayAfterIndexing(void* catVisual, uint8_t* parts)
+{
+    if (!catVisual || !parts || !RestoreInitialIndexingAppearance(parts))
+    {
+        return 0;
+    }
+
+    /* 
+    * Indexing intentionally walks live part and nested texture
+    * timelines. Re-apply the exact backing appearance captured before that
+    * walk, then rebuild the visual so the editor opens on the same cat that
+    * was present when indexing began rather than generating a replacement...
+    */
+    if (g_prepareCatPartsVisual)
+    {
+        g_prepareCatPartsVisual(parts);
+    }
+
+    ClearPresetSkipBlankBypass();
+    ClearNamedAppearanceIDs();
+    memset(g_idInputStates, 0, sizeof(g_idInputStates));
+    g_activeIDInput = APPEARANCE_FIELD_COUNT;
+    g_activeAppearancePath[0] = '\0';
+    g_selectedPresetName[0] = '\0';
+
+    RefreshEditorCatVisual(catVisual, parts);
+    g_timelineVisualNeedsRefresh = 0;
+    ResetInitialIndexingAppearanceSnapshot();
+
+    AddDebugMessage("Ready!");
+    Log("Restored the indexed stray's original parts and textures after exhaustive appearance indexing completed!");
     return 1;
 }
 
@@ -664,6 +1004,7 @@ static int PaletteControl(const char* label, int* value, int minimum)
     int controlChanged;
     int height;
     int maximum;
+    int preserveLoadedValue;
     int previousValue;
     int skipBlankRows;
 
@@ -674,6 +1015,7 @@ static int PaletteControl(const char* label, int* value, int minimum)
 
     height = GetRuntimePaletteHeight();
     maximum = height - 1;
+    preserveLoadedValue = PreservePresetLoadedValue(APPEARANCE_FIELD_PALETTE, *value);
     skipBlankRows = g_skipBlankArt && RuntimePaletteInfoIsReady();
     map = maximum >= minimum ? GetPaletteIDMap(minimum, maximum, skipBlankRows) : NULL;
     snprintf(coarseLabel, sizeof(coarseLabel), "##%s_coarse", label);
@@ -692,7 +1034,7 @@ static int PaletteControl(const char* label, int* value, int minimum)
         changed = 1;
     }
 
-    if (map && map->validTotal > 0)
+    if (!preserveLoadedValue && map && map->validTotal > 0)
     {
         adjustedValue = map->validIDs[FindTimelineMapIndex(map, *value)];
 
@@ -741,13 +1083,42 @@ static int PaletteControl(const char* label, int* value, int minimum)
     g_imguiSameLine();
     SetNextItemWidth(DEBUG_SLIDER_WIDTH);
 
-    if (map && map->validTotal > 0)
+    previousValue = *value;
+
+    if (preserveLoadedValue)
+    {
+        /* 
+        * Display the preset's exact palette row even when it is blank or a
+        * repeated row. If the user moves the slider, snap that interaction
+        * back onto the user's normal skip-filtered palette map...
+        */
+        controlChanged = SliderInt(coarseLabel, value, minimum, maximum, valueFormat);
+    }
+    else if (map && map->validTotal > 0)
     {
         controlChanged = TimelineMapSlider(coarseLabel, label, value, map);
     }
     else
     {
         controlChanged = SliderInt(coarseLabel, value, minimum, maximum, valueFormat);
+    }
+
+    if (controlChanged && preserveLoadedValue && map && map->validTotal > 0)
+    {
+        int preferredDirection;
+
+        preferredDirection = *value >= previousValue ? 1 : -1;
+        adjustedValue = *value;
+
+        if (FindTimelineMapIDForNavigation(map, *value, preferredDirection, &adjustedValue))
+        {
+            *value = adjustedValue;
+        }
+        else
+        {
+            *value = previousValue;
+            controlChanged = 0;
+        }
     }
 
     if (controlChanged)
@@ -805,6 +1176,12 @@ static int PaletteControl(const char* label, int* value, int minimum)
     }
 
     changed |= controlChanged;
+
+    if (changed)
+    {
+        g_presetSkipBlankActive[APPEARANCE_FIELD_PALETTE] = 0;
+    }
+
     AddVerticalGap(DEBUG_CONTROL_ROW_GAP);
     return changed;
 }
@@ -819,18 +1196,40 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
     int controlChanged;
     int hasLiveTimeline;
     int maximum;
+    int preserveLoadedValue;
     int previousValue;
     int preferredDirection;
     int skipBlankFrames;
+    int timelineMapBuilding;
 
-    maximum = GetFieldTimelineExtent(catVisual, field);
-    hasLiveTimeline = maximum >= minimum;
-
-    if (!hasLiveTimeline)
+    /*
+    * A preset/.catstruct load replaces CatParts immediately, but the live
+    * CatVisual/MovieClip graph is not rebuilt until the refresh at the end
+    * of this editor frame.  Inspecting that OLD graph here can report the
+    * previous texture extent and clamp a freshly loaded custom texture ID
+    * before MCPF gets a chance to synchronize the new part timelines.
+    *
+    * While a full visual refresh is pending, preserve the exact stored ID
+    * and defer all live-timeline range/blank-art validation until the next
+    * frame, when the refreshed graph is authoritative.
+    */
+    if (g_timelineVisualNeedsRefresh)
     {
         maximum = APPEARANCE_MAX_ID;
+        hasLiveTimeline = 0;
+    }
+    else
+    {
+        maximum = GetFieldTimelineExtent(catVisual, field);
+        hasLiveTimeline = maximum >= minimum;
+
+        if (!hasLiveTimeline)
+        {
+            maximum = APPEARANCE_MAX_ID;
+        }
     }
 
+    preserveLoadedValue = PreservePresetLoadedValue(field, *value);
     skipBlankFrames = g_skipBlankArt && hasLiveTimeline && FieldSkipsBlankFrames(field);
     timelineMap = NULL;
 
@@ -862,7 +1261,9 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
         timelineMap = GetTimelineIDMap(catVisual, field, minimum, maximum);
     }
 
-    if (skipBlankFrames && timelineMap && timelineMap->validTotal > 0)
+    timelineMapBuilding = skipBlankFrames && timelineMap && timelineMap->building;
+
+    if (!preserveLoadedValue && skipBlankFrames && !timelineMapBuilding && timelineMap && timelineMap->validTotal > 0)
     {
         adjustedValue = timelineMap->validIDs[FindTimelineMapIndex(timelineMap, *value)];
 
@@ -875,7 +1276,7 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
             changed = 1;
         }
     }
-    else if (skipBlankFrames && (g_timelineValidatedVisual[field] != catVisual || g_timelineValidatedValue[field] != *value))
+    else if (!preserveLoadedValue && skipBlankFrames && !timelineMapBuilding && (g_timelineValidatedVisual[field] != catVisual || g_timelineValidatedValue[field] != *value))
     {
         adjustedValue = *value;
         
@@ -892,7 +1293,7 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
     previousValue = *value;
     controlChanged = ArrowButton(label, value, minimum, maximum, -1);
 
-    if (controlChanged && skipBlankFrames)
+    if (controlChanged && skipBlankFrames && !timelineMapBuilding)
     {
         adjustedValue = previousValue;
 
@@ -931,7 +1332,21 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
     SetNextItemWidth(DEBUG_SLIDER_WIDTH);
     previousValue = *value;
 
-    if (skipBlankFrames && timelineMap && timelineMap->validTotal > 0)
+    if (timelineMapBuilding)
+    {
+        snprintf(valueFormat, sizeof(valueFormat), "%s: %%.0f (indexing)", label);
+        controlChanged = SliderInt(coarseLabel, value, minimum, maximum, valueFormat);
+    }
+    else if (preserveLoadedValue)
+    {
+        /* 
+        * Keep the preset's exact loaded frame visible even when that frame
+        * is normally filtered. Any slider interaction is still projected
+        * onto the active skip map immediately... 
+        */
+        controlChanged = SliderInt(coarseLabel, value, minimum, maximum, valueFormat);
+    }
+    else if (skipBlankFrames && timelineMap && timelineMap->validTotal > 0)
     {
         controlChanged = TimelineMapSlider(coarseLabel, label, value, timelineMap);
     }
@@ -949,12 +1364,24 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
         controlChanged = SliderInt(coarseLabel, value, minimum, maximum, valueFormat);
     }
 
-    if (controlChanged && skipBlankFrames && (!timelineMap || !timelineMap->validIDs))
+    if (controlChanged && skipBlankFrames && !timelineMapBuilding && (preserveLoadedValue || !timelineMap || !timelineMap->validIDs))
     {
         preferredDirection = *value >= previousValue ? 1 : -1;
         adjustedValue = *value;
 
-        if (FindTimelineIDForNavigation(catVisual, field, *value, preferredDirection, minimum, maximum, &adjustedValue))
+        if (timelineMap && timelineMap->validTotal > 0)
+        {
+            if (FindTimelineMapIDForNavigation(timelineMap, *value, preferredDirection, &adjustedValue))
+            {
+                *value = adjustedValue;
+            }
+            else
+            {
+                *value = previousValue;
+                controlChanged = 0;
+            }
+        }
+        else if (FindTimelineIDForNavigation(catVisual, field, *value, preferredDirection, minimum, maximum, &adjustedValue))
         {
             *value = adjustedValue;
         }
@@ -977,7 +1404,7 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
     previousValue = *value;
     controlChanged = ArrowButton(label, value, minimum, maximum, 1);
 
-    if (controlChanged && skipBlankFrames)
+    if (controlChanged && skipBlankFrames && !timelineMapBuilding)
     {
         adjustedValue = previousValue;
 
@@ -1015,43 +1442,79 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
     g_imguiSameLine();
     AddHorizontalGap(DEBUG_HORIZONTAL_GAP);
     previousValue = *value;
+
+    /*
+    * Timeline validation is allowed to
+    * reject/adjust the numeric value, but it must NOT canonicalize an exact
+    * named match back to its frame number...
+    *
+    * Preserve the old alias as well, so a rejected resolved ID can restore
+    * the complete previous field state instead of leaving a stale new alias
+    * attached to the previous numeric value...
+    */
+    char previousNamedID[NAMED_ID_BUFFER_SIZE];
+
+    snprintf(previousNamedID, sizeof(previousNamedID), "%s", g_namedAppearanceIDs[field]);
     controlChanged = TypedIDField(field, label, value, minimum, maximum);
 
-    if (controlChanged && skipBlankFrames)
+    if (controlChanged && skipBlankFrames && !timelineMapBuilding)
     {
+        int resolvedValue;
+
         preferredDirection = *value >= previousValue ? 1 : -1;
-        adjustedValue = *value;
+        resolvedValue = *value;
+        adjustedValue = resolvedValue;
 
         if (timelineMap && timelineMap->validTotal > 0)
         {
-            if (FindTimelineMapIDForNavigation(timelineMap, *value, preferredDirection, &adjustedValue))
+            if (FindTimelineMapIDForNavigation(timelineMap, resolvedValue, preferredDirection, &adjustedValue))
+            {
+                if (adjustedValue != resolvedValue)
+                {
+                    // Validation actually changed the selection, so the typed alias no longer identifies the selected ID...
+                    *value = adjustedValue;
+                    SetNamedAppearanceID(field, NULL);
+                    SyncIDInput(field, *value);
+                }
+
+                // (Exact match: Keep g_namedAppearanceIDs[field] and the user's text untouched)...
+            }
+            else
+            {
+                *value = previousValue;
+                SetNamedAppearanceID(field, previousNamedID[0] ? previousNamedID : NULL);
+                SyncIDInput(field, *value);
+                controlChanged = 0;
+            }
+        }
+        else if (FindTimelineIDForNavigation(catVisual, field, resolvedValue, preferredDirection, minimum, maximum, &adjustedValue))
+        {
+            if (adjustedValue != resolvedValue)
             {
                 *value = adjustedValue;
                 SetNamedAppearanceID(field, NULL);
                 SyncIDInput(field, *value);
             }
-            else
-            {
-                *value = previousValue;
-                controlChanged = 0;
-            }
-        }
-        else if (FindTimelineIDForNavigation(catVisual, field, *value, preferredDirection, minimum, maximum, &adjustedValue))
-        {
-            *value = adjustedValue;
-            SetNamedAppearanceID(field, NULL);
-            SyncIDInput(field, *value);
+
+            // Exact match: Preserve the typed alias...
         }
         else
         {
             *value = previousValue;
+            SetNamedAppearanceID(field, previousNamedID[0] ? previousNamedID : NULL);
+            SyncIDInput(field, *value);
             controlChanged = 0;
         }
     }
 
     changed |= controlChanged;
 
-    if (skipBlankFrames)
+    if (changed)
+    {
+        g_presetSkipBlankActive[field] = 0;
+    }
+
+    if (skipBlankFrames && !timelineMapBuilding)
     {
         g_timelineValidatedVisual[field] = catVisual;
         g_timelineValidatedValue[field] = *value;
@@ -1060,6 +1523,85 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
     AddVerticalGap(DEBUG_CONTROL_ROW_GAP);
 
     return changed;
+}
+
+static int MirrorSymmetryField(AppearanceField sourceField, int sourceValue, AppearanceField targetField, int* targetValue)
+{
+    const char* sourceNamedID;
+
+    if (!targetValue || targetField < 0 || targetField >= APPEARANCE_FIELD_COUNT)
+    {
+        return 0;
+    }
+
+    sourceNamedID = g_namedAppearanceIDs[sourceField][0] ? g_namedAppearanceIDs[sourceField] : NULL;
+
+    if (*targetValue == sourceValue && ((sourceNamedID && strcmp(g_namedAppearanceIDs[targetField], sourceNamedID) == 0) || (!sourceNamedID && g_namedAppearanceIDs[targetField][0] == '\0')))
+    {
+        return 0;
+    }
+
+    *targetValue = sourceValue;
+    SetNamedAppearanceID(targetField, sourceNamedID);
+    SyncIDInput(targetField, sourceValue);
+    DeactivateIDInput(targetField, sourceValue);
+    g_timelineValidatedVisual[targetField] = NULL;
+    g_timelineValidatedValue[targetField] = 0;
+    return 1;
+}
+
+static int ApplySymmetryGroups(uint8_t* parts)
+{
+    int changed;
+    int legValue;
+    int armValue;
+    int eyeValue;
+    int browValue;
+    int earValue;
+
+    if (!parts || !g_symmetryEnabled)
+    {
+        return 0;
+    }
+
+    changed = 0;
+
+    // Keep left/right members of each limb family paired...
+    legValue = *(int*)(parts + CATPART_LEG1_ID_OFFSET);
+    changed |= MirrorSymmetryField(APPEARANCE_FIELD_LEG1, legValue, APPEARANCE_FIELD_LEG2, (int*)(parts + CATPART_LEG2_ID_OFFSET));
+
+    armValue = *(int*)(parts + CATPART_ARM1_ID_OFFSET);
+    changed |= MirrorSymmetryField(APPEARANCE_FIELD_ARM1, armValue, APPEARANCE_FIELD_ARM2, (int*)(parts + CATPART_ARM2_ID_OFFSET));
+
+    eyeValue = *(int*)(parts + CATPART_LEFTEYE_ID_OFFSET);
+    changed |= MirrorSymmetryField(APPEARANCE_FIELD_LEFTEYE, eyeValue, APPEARANCE_FIELD_RIGHTEYE, (int*)(parts + CATPART_RIGHTEYE_ID_OFFSET));
+
+    browValue = *(int*)(parts + CATPART_LEFTEYEBROW_ID_OFFSET);
+    changed |= MirrorSymmetryField(APPEARANCE_FIELD_LEFTEYEBROW, browValue, APPEARANCE_FIELD_RIGHTEYEBROW, (int*)(parts + CATPART_RIGHTEYEBROW_ID_OFFSET));
+
+    earValue = *(int*)(parts + CATPART_LEFTEAR_ID_OFFSET);
+    changed |= MirrorSymmetryField(APPEARANCE_FIELD_LEFTEAR, earValue, APPEARANCE_FIELD_RIGHTEAR, (int*)(parts + CATPART_RIGHTEAR_ID_OFFSET));
+
+    return changed;
+}
+
+static int DrawSymmetryCheckbox(uint8_t* parts)
+{
+    bool enabled;
+    int appearanceChanged;
+
+    enabled = g_symmetryEnabled != 0;
+
+    if (!g_imguiCheckbox("Symmetry##appearance_symmetry", &enabled))
+    {
+        return 0;
+    }
+
+    g_symmetryEnabled = enabled ? 1 : 0;
+    g_activeIDInput = APPEARANCE_FIELD_COUNT;
+    appearanceChanged = ApplySymmetryGroups(parts);
+    AddDebugMessage("Appearance symmetry %s!", g_symmetryEnabled ? "enabled" : "disabled");
+    return appearanceChanged;
 }
 
 static int VoiceDropdown(uint8_t* parts)
@@ -1230,8 +1772,10 @@ static int ReadGonAppearanceID(uint8_t* object, const char* name, AppearanceFiel
 static int LoadCustomCatPreset(uint8_t* parts, int* defaultFrame, uint8_t* preset, const char* presetName)
 {
     AppearanceSnapshot appearance;
+    AppearanceField appearanceField;
     int fieldValue;
     int loadedFields;
+    unsigned int loadedAppearanceMask;
     double pitchValue;
 
     if (!parts || !defaultFrame || !preset || !presetName)
@@ -1240,9 +1784,9 @@ static int LoadCustomCatPreset(uint8_t* parts, int* defaultFrame, uint8_t* prese
     }
 
     ReadAppearance(parts, &appearance);
-    g_skipBlankArt = 0;
     ClearNamedAppearanceIDs();
     loadedFields = 0;
+    loadedAppearanceMask = 0;
     *defaultFrame = APPEARANCE_DEFAULT_FRAME;
 
     if (ReadGonNumber(preset, "default_frame", &fieldValue))
@@ -1262,6 +1806,12 @@ static int LoadCustomCatPreset(uint8_t* parts, int* defaultFrame, uint8_t* prese
         appearance.leftear = fieldValue;
         appearance.rightear = fieldValue;
         appearance.mouth = fieldValue;
+
+        for (appearanceField = APPEARANCE_FIELD_BODY; appearanceField < APPEARANCE_FIELD_COUNT; ++appearanceField)
+        {
+            loadedAppearanceMask |= 1U << (unsigned int)appearanceField;
+        }
+
         ++loadedFields;
     }
 
@@ -1277,6 +1827,7 @@ static int LoadCustomCatPreset(uint8_t* parts, int* defaultFrame, uint8_t* prese
         if (ReadGonAppearanceID(preset, name, field, &fieldValue)) \
         { \
             appearance.member = fieldValue; \
+            loadedAppearanceMask |= 1U << (unsigned int)(field); \
             ++loadedFields; \
         } \
     } while (0)
@@ -1320,6 +1871,15 @@ static int LoadCustomCatPreset(uint8_t* parts, int* defaultFrame, uint8_t* prese
     }
 
     ApplyAppearance(parts, &appearance);
+
+    /* 
+    * Loading a preset: Preserve every appearance ID that
+    * the preset explicitly supplied even if the user's skip filter would
+    * normally classify it as blank/repeated. The checkbox itself stays
+    * untouched, and any later edit immediately
+    * resumes normal skip-filtered navigation...
+    */
+    PreservePresetLoadedAppearance(&appearance, loadedAppearanceMask);
     memset(g_idInputStates, 0, sizeof(g_idInputStates));
     g_activeIDInput = APPEARANCE_FIELD_COUNT;
     g_activeAppearancePath[0] = '\0';
@@ -1588,6 +2148,7 @@ static int RandomizeButton(uint8_t* parts)
     }
 
     g_randomizeCatParts(parts, 3);
+    ClearPresetSkipBlankBypass();
     ClearNamedAppearanceIDs();
     g_selectedPresetName[0] = '\0';
     memset(g_idInputStates, 0, sizeof(g_idInputStates));
@@ -1618,6 +2179,7 @@ static int NewCatButton(uint8_t* parts)
     }
 
     g_randomizeCatParts(parts, 3);
+    ClearPresetSkipBlankBypass();
     ClearNamedAppearanceIDs();
     g_selectedPresetName[0] = '\0';
     memset(g_idInputStates, 0, sizeof(g_idInputStates));
@@ -1774,8 +2336,11 @@ void ApplyAppearance(uint8_t* parts, const AppearanceSnapshot* appearance)
     int claws;
     int texture;
 
-    texture = ClampAppearanceID(appearance->texture, 1);
-    SetAllPartTextures(parts, texture);
+    if (!parts || !appearance)
+    {
+        return;
+    }
+
     claws = ClampAppearanceID(appearance->claws, CLAWS_ENABLED_VALUE);
 
     *(int*)(parts + CATPART_ARM1_CLAWS_OFFSET) = claws;
@@ -1795,13 +2360,64 @@ void ApplyAppearance(uint8_t* parts, const AppearanceSnapshot* appearance)
     *(int*)(parts + CATPART_LEFTEAR_ID_OFFSET) = ClampAppearanceID(appearance->leftear, 1);
     *(int*)(parts + CATPART_RIGHTEAR_ID_OFFSET) = ClampAppearanceID(appearance->rightear, 1);
     *(int*)(parts + CATPART_MOUTH_ID_OFFSET) = ClampAppearanceID(appearance->mouth, 1);
-    
+
+    /*
+    * A full preset/save load replaces part IDs and texture IDs together.
+    * CatParts::PrepareVisual is the game's normal post-load path: For each
+    * part it seeks the newly selected part frame, resolves its live tex
+    * child, then seeks that child to texture - 1. MCPF hooks this tex
+    * lookup, so this ordering also guarantees a modded part's private
+    * texture timeline is synchronized before the saved custom texture ID is applied...
+    *
+    * Do this here (full appearance loads only), not for every slider edit!
+    */
+    texture = ClampAppearanceID(appearance->texture, 1);
+    SetAllPartTextures(parts, texture);
+
     if (appearance->voice[0])
     {
         SetMsvcString((MsvcString*)(parts + CATPART_VOICE_OFFSET), appearance->voice);
     }
-    
+
     *(double*)(parts + CATPART_VOICE_PITCH_OFFSET) = ClampVoicePitch(appearance->voicePitch);
+
+    if (g_prepareCatPartsVisual)
+    {
+        g_prepareCatPartsVisual(parts);
+    }
+
+    /* 
+    * Timeline profiles are keyed by immutable SWF definition + extent, and
+    * ID maps self-invalidate from their definition signature. Keep those
+    * caches across appearance loads instead of forcing another
+    * frame display-list scan after every preset/cat update...
+    */
+    memset(g_timelineValidatedVisual, 0, sizeof(g_timelineValidatedVisual));
+    memset(g_timelineValidatedValue, 0, sizeof(g_timelineValidatedValue));
+    g_timelineVisualNeedsRefresh = 1;
+}
+
+static void RefreshEditorCatVisual(void* catVisual, uint8_t* parts)
+{
+    if (!catVisual || !parts)
+    {
+        return;
+    }
+
+    if (!*(void**)((uint8_t*)catVisual + CAT_VISUAL_CAT_DATA_OFFSET))
+    {
+        g_prepareCatPartsVisual(parts);
+    }
+
+    g_refreshCatVisual(catVisual);
+
+    /* 
+    * CatVisual::Refresh can replace the live CatPartGraphics/MovieClip
+    * instances. Synchronize MCPF textures on those new instances and
+    * re-apply the current palette immediately...
+    */
+    SyncMcpfVisualTextureState(catVisual, *(int*)(parts + CATPART_BODY_TEXTURE_OFFSET));
+    ApplyPaletteMaterial(catVisual, parts);
 }
 
 void HookSceneDraw(void* scene)
@@ -1810,6 +2426,8 @@ void HookSceneDraw(void* scene)
     void* catVisual;
     uint8_t* parts;
     int changed;
+    int indexingReady;
+    int indexingPercent;
     int texture;
 
     customScene = InterlockedCompareExchangePointer((PVOID volatile*)&g_customScene, NULL, NULL);
@@ -1821,6 +2439,7 @@ void HookSceneDraw(void* scene)
     }
 
     UpdateEditorInputState();
+    BeginTimelineIndexingFrame();
     g_timelineVisualNeedsRefresh = 0;
 
     if (g_screenshotState != SCREENSHOT_STATE_IDLE)
@@ -2007,7 +2626,7 @@ void HookSceneDraw(void* scene)
         return;
     }
 
-    SetLockedEditorWindowGeometry();
+    SetLockedEditorWindowGeometry(!g_timelineInitialIndexingComplete);
 
     if (!g_editorWindowOpen)
     {
@@ -2036,6 +2655,59 @@ void HookSceneDraw(void* scene)
         changed = 0;
         g_defaultFrame = APPEARANCE_DEFAULT_FRAME;
 
+        /* 
+        * Reset per-visit editor state and capture the scene's current cat
+        * before the exhaustive scanner starts walking live part/texture
+        * timelines. That same cat is restored when indexing completes...
+        */
+        PrepareFreshEditorEntryIfNeeded(catVisual, parts);
+
+        if (!g_timelineInitialIndexingComplete)
+        {
+            /* 
+            * Scene init normally captures this before the first draw. Keep a
+            * defensive first-frame capture here as well so our indexing can never
+            * start without a stable restoration target...
+            */
+            if (!catVisual || !CaptureInitialIndexingAppearance(parts))
+            {
+                DrawTimelineIndexingState(0);
+                g_imguiEnd();
+                return;
+            }
+
+            indexingPercent = 0;
+            indexingReady = AdvanceInitialTimelineIndexes(catVisual, &indexingPercent);
+
+            if (!indexingReady || g_timelineVisualNeedsRefresh)
+            {
+                if (g_timelineVisualNeedsRefresh && catVisual)
+                {
+                    RefreshEditorCatVisual(catVisual, parts);
+                }
+
+                DrawTimelineIndexingState(indexingPercent);
+                g_imguiEnd();
+                return;
+            }
+
+            if (!RestoreInitialStrayAfterIndexing(catVisual, parts))
+            {
+                AddDebugMessage("Initial stray restore failed: Starting appearance was not captured!");
+                Log("Initial appearance indexing completed, but the indexed starting stray could not be restored");
+                DrawTimelineIndexingState(100);
+                g_imguiEnd();
+                return;
+            }
+
+            g_timelineInitialIndexingComplete = 1;
+            Log("Initial appearance indexing complete, including all discovered modded part texture definitions; automatic scanner stopped");
+
+            DrawTimelineIndexingState(100);
+            g_imguiEnd();
+            return;
+        }
+
         ExportButton(parts);
         g_imguiSameLine();
         AddHorizontalGap(DEBUG_HORIZONTAL_GAP);
@@ -2053,8 +2725,27 @@ void HookSceneDraw(void* scene)
         ExitButton();
         AddVerticalGap(DEBUG_SECTION_VERTICAL_GAP);
         changed |= CustomCatPresetDropdown(parts, &g_defaultFrame);
+
         AddVerticalGap(DEBUG_SECTION_VERTICAL_GAP);
-        changed |= DrawSavedAppearanceFiles(parts, &g_defaultFrame);
+        {
+            int savedCatChanged;
+
+            savedCatChanged = DrawSavedAppearanceFiles(parts, &g_defaultFrame);
+
+            if (savedCatChanged)
+            {
+                // Saved .catstruct loads honor the user's active skip setting...
+                ClearPresetSkipBlankBypass();
+                changed = 1;
+            }
+        }
+
+        /* 
+        * Presets, NEW CAT and RANDOMIZE options can replace several CatParts values
+        * at once. Reapply the active symmetry constraint before rendering
+        * the grouped controls so symmetry remains a live editor invariant...
+        */
+        changed |= ApplySymmetryGroups(parts);
         AddVerticalGap(DEBUG_SECTION_VERTICAL_GAP);
 
         if (SectionHeader(APPEARANCE_SECTION_COAT, "Coat & Color"))
@@ -2088,10 +2779,21 @@ void HookSceneDraw(void* scene)
         if (SectionHeader(APPEARANCE_SECTION_LIMBS, "Legs & Arms"))
         {
             AdjustSectionIndent(DEBUG_SECTION_INDENT);
-            changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEG1, "front leg", (int*)(parts + CATPART_LEG1_ID_OFFSET), 1);
-            changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEG2, "back leg", (int*)(parts + CATPART_LEG2_ID_OFFSET), 1);
-            changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_ARM1, "front arm", (int*)(parts + CATPART_ARM1_ID_OFFSET), 1);
-            changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_ARM2, "back arm", (int*)(parts + CATPART_ARM2_ID_OFFSET), 1);
+
+            if (g_symmetryEnabled)
+            {
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEG1, "legs", (int*)(parts + CATPART_LEG1_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_ARM1, "arms", (int*)(parts + CATPART_ARM1_ID_OFFSET), 1);
+                changed |= ApplySymmetryGroups(parts);
+            }
+            else
+            {
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEG1, "front leg", (int*)(parts + CATPART_LEG1_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEG2, "back leg", (int*)(parts + CATPART_LEG2_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_ARM1, "front arm", (int*)(parts + CATPART_ARM1_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_ARM2, "back arm", (int*)(parts + CATPART_ARM2_ID_OFFSET), 1);
+            }
+
             DrawClawControl(parts);
             AdjustSectionIndent(-DEBUG_SECTION_INDENT);
         }
@@ -2101,12 +2803,24 @@ void HookSceneDraw(void* scene)
         if (SectionHeader(APPEARANCE_SECTION_FACE, "Face & Ears"))
         {
             AdjustSectionIndent(DEBUG_SECTION_INDENT);
-            changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEFTEYE, "left eye", (int*)(parts + CATPART_LEFTEYE_ID_OFFSET), 1);
-            changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_RIGHTEYE, "right eye", (int*)(parts + CATPART_RIGHTEYE_ID_OFFSET), 1);
-            changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEFTEYEBROW, "left brow", (int*)(parts + CATPART_LEFTEYEBROW_ID_OFFSET), 1);
-            changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_RIGHTEYEBROW, "right brow", (int*)(parts + CATPART_RIGHTEYEBROW_ID_OFFSET), 1);
-            changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEFTEAR, "left ear", (int*)(parts + CATPART_LEFTEAR_ID_OFFSET), 1);
-            changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_RIGHTEAR, "right ear", (int*)(parts + CATPART_RIGHTEAR_ID_OFFSET), 1);
+
+            if (g_symmetryEnabled)
+            {
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEFTEYE, "eyes", (int*)(parts + CATPART_LEFTEYE_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEFTEYEBROW, "brows", (int*)(parts + CATPART_LEFTEYEBROW_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEFTEAR, "ears", (int*)(parts + CATPART_LEFTEAR_ID_OFFSET), 1);
+                changed |= ApplySymmetryGroups(parts);
+            }
+            else
+            {
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEFTEYE, "left eye", (int*)(parts + CATPART_LEFTEYE_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_RIGHTEYE, "right eye", (int*)(parts + CATPART_RIGHTEYE_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEFTEYEBROW, "left brow", (int*)(parts + CATPART_LEFTEYEBROW_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_RIGHTEYEBROW, "right brow", (int*)(parts + CATPART_RIGHTEYEBROW_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_LEFTEAR, "left ear", (int*)(parts + CATPART_LEFTEAR_ID_OFFSET), 1);
+                changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_RIGHTEAR, "right ear", (int*)(parts + CATPART_RIGHTEAR_ID_OFFSET), 1);
+            }
+
             changed |= AppearanceControl(catVisual, APPEARANCE_FIELD_MOUTH, "mouth", (int*)(parts + CATPART_MOUTH_ID_OFFSET), 1);
             AdjustSectionIndent(-DEBUG_SECTION_INDENT);
         }
@@ -2123,16 +2837,15 @@ void HookSceneDraw(void* scene)
         }
 
         AddVerticalGap(DEBUG_SECTION_VERTICAL_GAP);
+        DrawSkipBlankArtCheckbox();
+        g_imguiSameLine();
+        AddHorizontalGap(DEBUG_HORIZONTAL_GAP);
+        changed |= DrawSymmetryCheckbox(parts);
+        AddVerticalGap(DEBUG_SECTION_VERTICAL_GAP);
 
         if ((changed || g_timelineVisualNeedsRefresh) && catVisual)
         {
-            if (!*(void**)((uint8_t*)catVisual + CAT_VISUAL_CAT_DATA_OFFSET))
-            {
-                g_prepareCatPartsVisual(parts);
-            }
-
-            g_refreshCatVisual(catVisual);
-            ApplyPaletteMaterial(catVisual, parts);
+            RefreshEditorCatVisual(catVisual, parts);
         }
 
         if ((GetAsyncKeyState(VK_F6) & 1) != 0)
@@ -2147,10 +2860,11 @@ void HookSceneDraw(void* scene)
             AddDebugMessage("Cat visual unavailable, controls cannot be applied!");
             Log("CatAppearanceUI loaded, but its first cat visual was not available to the ImGui panel!");
         }
+
+        AddVerticalGap(DEBUG_SECTION_VERTICAL_GAP);
+        DrawSkipBlankArtCheckbox();
     }
 
-    AddVerticalGap(DEBUG_SECTION_VERTICAL_GAP);
-    DrawSkipBlankArtCheckbox();
     AddVerticalGap(DEBUG_LOG_VERTICAL_GAP);
     DrawDebugLog();
     g_imguiEnd();
