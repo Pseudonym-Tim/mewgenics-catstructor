@@ -61,6 +61,20 @@ Use the **saved cats** dropdown to load or delete `.catstruct` files from the `s
 
 Catstructor is recommended for use with the [Custom Stray Framework](https://www.nexusmods.com/mewgenics/mods/434), as it makes it easier to add and manage custom stray cats in your mods.
 
+### Custom Cat Part/Texture Support
+
+Catstructor is compatible with [MewCatPartFramework](https://www.nexusmods.com/mewgenics/mods/489). Please read [this tutorial](https://github.com/Pseudonym-Tim/mew-cat-part-framework/#making-a-custom-cat-part-mod) explaining how you can add your own custom cat parts and textures. 
+
+You can have your cat use a custom modded part or texture by clicking the "**ID:**" field button next to **palette**, then typing in it's custom ID name, such as:
+
+```text
+@myPartOrTexture
+```
+
+You should then see that your cat updates to reflect the changes.
+
+Custom part/texture IDs are preserved when saving your cat or copying its `.gon` data.
+
 ### Custom Palette Support
 
 Catstructor is compatible with [MewPaletteExtender](https://www.nexusmods.com/mewgenics/mods/369). Please read [this tutorial](https://github.com/Pseudonym-Tim/mew-palette-extender#making-a-custom-palette-mod) explaining how you can add your own custom palettes. 
@@ -77,7 +91,7 @@ Custom palette IDs are preserved when saving your cat or copying its `.gon` data
 
 ## TODO/Future Support
 
-* A cat part and texture framework that will interface with this editor, similar in functionality to MewPaletteExtender. This will allow modders to easily add brand new mod-compatible things such as: cat body pieces, cat textures, and item visuals.
+* ~A cat part and texture framework that will interface with this editor, similar in functionality to MewPaletteExtender. This will allow modders to easily add brand new mod-compatible things such as: cat body pieces, cat textures, and item visuals.~ **EDIT: A cat part and texture framework has been released, but at the time of writing, it only supports cat-specific stuff rather additional than things such as items.**
 
 * The ability to add and view various items/equipment on your cats
 
