@@ -102,3 +102,9 @@ Custom palette IDs are preserved when saving your cat or copying its `.gon` data
 * Mutation info for your cat's currently selected parts/textures
 
 * Toggling visibility of individual cat parts
+
+* The ability to name your custom .catstruct files
+
+* The ability to rotate/orient your cat
+
+* The ability to test out various animations for your cat
