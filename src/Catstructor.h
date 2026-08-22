@@ -395,6 +395,7 @@ typedef void (__fastcall *fn_material_set_int)(void* material, MsvcString* param
 typedef uint8_t* (__fastcall *fn_image_decode_from_memory)(void* streamRange, int32_t* width, int32_t* height, int32_t* channels, int32_t requestedChannels);
 typedef int (__cdecl *fn_resolve_palette_id)(const char* id, int32_t* resolvedRow);
 typedef int (__cdecl *fn_resolve_cat_part_id)(const char* id, const char* expectedKind, int32_t* resolvedFrame);
+typedef int (__cdecl *fn_resolve_cat_part_field_id)(const char* id, const char* expectedKind, const char* fieldName, int32_t* resolvedFrame);
 typedef int (__cdecl *fn_sync_cat_texture_clip)(const char* partKind, void* textureMovieClip);
 
 typedef struct PatchBackup

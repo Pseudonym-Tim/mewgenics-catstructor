@@ -39,7 +39,9 @@ fn_imgui_begin_combo g_imguiBeginCombo;
 fn_imgui_end_combo g_imguiEndCombo;
 static fn_resolve_palette_id g_resolvePaletteID;
 static fn_resolve_cat_part_id g_resolveCatPartID;
+static fn_resolve_cat_part_field_id g_resolveCatPartFieldID;
 static fn_sync_cat_texture_clip g_syncCatTextureClip;
+static int g_loggedMcpfNamedApi;
 
 static void* volatile g_customButtonCallback;
 static void* volatile g_activeDemoMenu;
@@ -466,7 +468,7 @@ static void RefreshCompatibilityResolvers(void)
         }
     }
 
-    if (!g_resolveCatPartID || !g_syncCatTextureClip)
+    if (!g_resolveCatPartID || !g_resolveCatPartFieldID || !g_syncCatTextureClip)
     {
         module = GetModuleHandleA("MewCatPartFramework.dll");
 
@@ -476,9 +478,21 @@ static void RefreshCompatibilityResolvers(void)
             {
                 g_resolveCatPartID = (fn_resolve_cat_part_id)GetProcAddress(module, "MewCatPartFramework_ResolvePart");
             }
+
+            if (!g_resolveCatPartFieldID)
+            {
+                g_resolveCatPartFieldID = (fn_resolve_cat_part_field_id)GetProcAddress(module, "MewCatPartFramework_ResolvePartForField");
+            }
+
             if (!g_syncCatTextureClip)
             {
                 g_syncCatTextureClip = (fn_sync_cat_texture_clip)GetProcAddress(module, "MewCatPartFramework_SyncTextureClip");
+            }
+
+            if (!g_loggedMcpfNamedApi)
+            {
+                Log("MCPF named-ID API: legacy=%s field-aware=%s texture-sync=%s", g_resolveCatPartID ? "yes" : "no", g_resolveCatPartFieldID ? "yes" : "no", g_syncCatTextureClip ? "yes" : "no");
+                g_loggedMcpfNamedApi = 1;
             }
         }
     }
@@ -517,6 +531,29 @@ const char* NamedKindForField(AppearanceField field)
     }
 }
 
+static const char* NamedFieldSelectorForField(AppearanceField field)
+{
+    switch (field)
+    {
+        case APPEARANCE_FIELD_TEXTURE: return "texture";
+        case APPEARANCE_FIELD_BODY: return "body";
+        case APPEARANCE_FIELD_HEAD: return "head";
+        case APPEARANCE_FIELD_TAIL: return "tail";
+        case APPEARANCE_FIELD_LEG1: return "leg1";
+        case APPEARANCE_FIELD_LEG2: return "leg2";
+        case APPEARANCE_FIELD_ARM1: return "arm1";
+        case APPEARANCE_FIELD_ARM2: return "arm2";
+        case APPEARANCE_FIELD_LEFTEYE: return "lefteye";
+        case APPEARANCE_FIELD_RIGHTEYE: return "righteye";
+        case APPEARANCE_FIELD_LEFTEYEBROW: return "lefteyebrow";
+        case APPEARANCE_FIELD_RIGHTEYEBROW: return "righteyebrow";
+        case APPEARANCE_FIELD_LEFTEAR: return "leftear";
+        case APPEARANCE_FIELD_RIGHTEAR: return "rightear";
+        case APPEARANCE_FIELD_MOUTH: return "mouth";
+        default: return NULL;
+    }
+}
+
 int FieldSupportsNamedID(AppearanceField field)
 {
     RefreshCompatibilityResolvers();
@@ -526,7 +563,12 @@ int FieldSupportsNamedID(AppearanceField field)
         return g_resolvePaletteID != NULL;
     }
 
-    return NamedKindForField(field) != NULL && g_resolveCatPartID != NULL;
+    if (field == APPEARANCE_FIELD_LEFTEYE || field == APPEARANCE_FIELD_RIGHTEYE)
+    {
+        return g_resolveCatPartFieldID != NULL;
+    }
+
+    return NamedKindForField(field) != NULL && (g_resolveCatPartFieldID != NULL || g_resolveCatPartID != NULL);
 }
 
 int SyncMcpfTextureClip(const char* partKind, void* textureMovieClip)
@@ -544,6 +586,7 @@ int ResolveNamedAppearanceID(AppearanceField field, const char* token, int* reso
 {
     int32_t value;
     const char* kind;
+    const char* selector;
 
     if (!token || token[0] != '@' || !token[1] || !resolvedValue)
     {
@@ -563,14 +606,39 @@ int ResolveNamedAppearanceID(AppearanceField field, const char* token, int* reso
     else
     {
         kind = NamedKindForField(field);
+        selector = NamedFieldSelectorForField(field);
 
-        if (!kind || !g_resolveCatPartID || !g_resolveCatPartID(token, kind, &value))
+        if (!kind || !selector)
         {
             return 0;
+        }
+
+        if (field == APPEARANCE_FIELD_LEFTEYE || field == APPEARANCE_FIELD_RIGHTEYE)
+        {
+            if (!g_resolveCatPartFieldID || !g_resolveCatPartFieldID(token, kind, selector, &value))
+            {
+                return 0;
+            }
+        }
+        else
+        {
+            if (g_resolveCatPartID && g_resolveCatPartID(token, kind, &value))
+            {
+                // Nothing, we handle this elsewhere now...
+            }
+            else if (g_resolveCatPartFieldID && g_resolveCatPartFieldID(token, kind, selector, &value))
+            {
+                // Nothing, we handle this elsewhere now...
+            }
+            else
+            {
+                return 0;
+            }
         }
     }
 
     *resolvedValue = (int)value;
+
     return 1;
 }
 

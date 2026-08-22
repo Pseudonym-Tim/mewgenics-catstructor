@@ -38,11 +38,38 @@ static InitialIndexingVisualSnapshot g_initialIndexingVisualSnapshot;
 
 static int g_presetSkipBlankValues[APPEARANCE_FIELD_COUNT];
 static unsigned char g_presetSkipBlankActive[APPEARANCE_FIELD_COUNT];
+static int g_presetSymmetryBypass;
 
 static void ClearPresetSkipBlankBypass(void)
 {
     memset(g_presetSkipBlankValues, 0, sizeof(g_presetSkipBlankValues));
     memset(g_presetSkipBlankActive, 0, sizeof(g_presetSkipBlankActive));
+}
+
+static void ClearPresetSymmetryBypass(void)
+{
+    g_presetSymmetryBypass = 0;
+}
+
+static int FieldUsesSymmetry(AppearanceField field)
+{
+    switch (field)
+    {
+        case APPEARANCE_FIELD_LEG1:
+        case APPEARANCE_FIELD_LEG2:
+        case APPEARANCE_FIELD_ARM1:
+        case APPEARANCE_FIELD_ARM2:
+        case APPEARANCE_FIELD_LEFTEYE:
+        case APPEARANCE_FIELD_RIGHTEYE:
+        case APPEARANCE_FIELD_LEFTEYEBROW:
+        case APPEARANCE_FIELD_RIGHTEYEBROW:
+        case APPEARANCE_FIELD_LEFTEAR:
+        case APPEARANCE_FIELD_RIGHTEAR:
+            return 1;
+
+        default:
+            return 0;
+    }
 }
 
 static int PreservePresetLoadedValue(AppearanceField field, int value)
@@ -545,6 +572,7 @@ static int RestoreInitialStrayAfterIndexing(void* catVisual, uint8_t* parts)
     }
 
     ClearPresetSkipBlankBypass();
+    ClearPresetSymmetryBypass();
     ClearNamedAppearanceIDs();
     memset(g_idInputStates, 0, sizeof(g_idInputStates));
     g_activeIDInput = APPEARANCE_FIELD_COUNT;
@@ -886,7 +914,7 @@ static int TypedIDField(AppearanceField field, const char* label, int* value, in
         }
     }
 
-    if (state->text[0] == '@' && IsCompleteNamedID(state->text) && ResolveNamedAppearanceID(field, state->text, &namedValue) && namedValue >= minimum && namedValue <= maximum)
+    if (state->text[0] == '@' && IsCompleteNamedID(state->text) && ResolveNamedAppearanceID(field, state->text, &namedValue) && namedValue >= minimum && namedValue <= APPEARANCE_MAX_ID)
     {
         if (*value != namedValue || strcmp(g_namedAppearanceIDs[field], state->text) != 0)
         {
@@ -904,9 +932,23 @@ static int TypedIDField(AppearanceField field, const char* label, int* value, in
 
     if (g_keyPressed[KEY_RETURN])
     {
-        if (state->text[0] == '@' && (!IsCompleteNamedID(state->text) || !ResolveNamedAppearanceID(field, state->text, &namedValue) || namedValue < minimum || namedValue > maximum))
+        if (state->text[0] == '@')
         {
-            AddDebugMessage("Unknown, unavailable, or out-of-range named ID: %s", state->text);
+            int completeNamedID = IsCompleteNamedID(state->text);
+            int resolverOK = completeNamedID && ResolveNamedAppearanceID(field, state->text, &namedValue);
+            int inRange = resolverOK && namedValue >= minimum && namedValue <= APPEARANCE_MAX_ID;
+
+            if (!inRange)
+            {
+                Log("Named ID rejected: field=%s token=%s complete=%d resolver=%d value=%d allowed=%d..%d", label, state->text, completeNamedID, resolverOK, resolverOK ? namedValue : -1, minimum, APPEARANCE_MAX_ID);
+                AddDebugMessage("Unknown, unavailable, or out-of-range named ID: %s", state->text);
+            }
+            else
+            {
+                Log("Named ID accepted: field=%s token=%s => %d", label, state->text, namedValue);
+                SyncIDInput(field, *value);
+                g_activeIDInput = APPEARANCE_FIELD_COUNT;
+            }
         }
         else
         {
@@ -1247,7 +1289,7 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
         DeactivateIDInput(field, *value);
         changed = 1;
     }
-    else if (hasLiveTimeline && *value > maximum)
+    else if (hasLiveTimeline && *value > maximum && !g_namedAppearanceIDs[field][0])
     {
         *value = maximum;
         SetNamedAppearanceID(field, NULL);
@@ -1457,7 +1499,7 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
     snprintf(previousNamedID, sizeof(previousNamedID), "%s", g_namedAppearanceIDs[field]);
     controlChanged = TypedIDField(field, label, value, minimum, maximum);
 
-    if (controlChanged && skipBlankFrames && !timelineMapBuilding)
+    if (controlChanged && skipBlankFrames && !timelineMapBuilding && !g_namedAppearanceIDs[field][0])
     {
         int resolvedValue;
 
@@ -1512,6 +1554,17 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
     if (changed)
     {
         g_presetSkipBlankActive[field] = 0;
+
+        /*
+        * A preset is allowed to remain asymmetric even while the Symmetry
+        * checkbox is enabled. The first deliberate edit to any field that
+        * participates in a symmetry group retires that temporary exemption,
+        * the caller's normal ApplySymmetryGroups() pass then mirrors the edit...
+        */
+        if (FieldUsesSymmetry(field))
+        {
+            ClearPresetSymmetryBypass();
+        }
     }
 
     if (skipBlankFrames && !timelineMapBuilding)
@@ -1528,6 +1581,7 @@ static int AppearanceControl(void* catVisual, AppearanceField field, const char*
 static int MirrorSymmetryField(AppearanceField sourceField, int sourceValue, AppearanceField targetField, int* targetValue)
 {
     const char* sourceNamedID;
+    int mirroredValue;
 
     if (!targetValue || targetField < 0 || targetField >= APPEARANCE_FIELD_COUNT)
     {
@@ -1535,16 +1589,28 @@ static int MirrorSymmetryField(AppearanceField sourceField, int sourceValue, App
     }
 
     sourceNamedID = g_namedAppearanceIDs[sourceField][0] ? g_namedAppearanceIDs[sourceField] : NULL;
+    mirroredValue = sourceValue;
 
-    if (*targetValue == sourceValue && ((sourceNamedID && strcmp(g_namedAppearanceIDs[targetField], sourceNamedID) == 0) || (!sourceNamedID && g_namedAppearanceIDs[targetField][0] == '\0')))
+    /*
+    * Named IDs are logical aliases, not necessarily the same absolute frame
+    * on both sides. Eye timelines in particular have different vanilla
+    * extents, so resolve the alias again for the destination field instead
+    * of copying the left-eye numeric frame into the right-eye slot...
+    */
+    if (sourceNamedID && !ResolveNamedAppearanceID(targetField, sourceNamedID, &mirroredValue))
     {
         return 0;
     }
 
-    *targetValue = sourceValue;
+    if (*targetValue == mirroredValue && ((sourceNamedID && strcmp(g_namedAppearanceIDs[targetField], sourceNamedID) == 0) || (!sourceNamedID && g_namedAppearanceIDs[targetField][0] == '\0')))
+    {
+        return 0;
+    }
+
+    *targetValue = mirroredValue;
     SetNamedAppearanceID(targetField, sourceNamedID);
-    SyncIDInput(targetField, sourceValue);
-    DeactivateIDInput(targetField, sourceValue);
+    SyncIDInput(targetField, mirroredValue);
+    DeactivateIDInput(targetField, mirroredValue);
     g_timelineValidatedVisual[targetField] = NULL;
     g_timelineValidatedValue[targetField] = 0;
     return 1;
@@ -1559,7 +1625,7 @@ static int ApplySymmetryGroups(uint8_t* parts)
     int browValue;
     int earValue;
 
-    if (!parts || !g_symmetryEnabled)
+    if (!parts || !g_symmetryEnabled || g_presetSymmetryBypass)
     {
         return 0;
     }
@@ -1599,6 +1665,9 @@ static int DrawSymmetryCheckbox(uint8_t* parts)
 
     g_symmetryEnabled = enabled ? 1 : 0;
     g_activeIDInput = APPEARANCE_FIELD_COUNT;
+
+    // Explicitly touching the Symmetry checkbox ends any preset-load bypass...
+    ClearPresetSymmetryBypass();
     appearanceChanged = ApplySymmetryGroups(parts);
     AddDebugMessage("Appearance symmetry %s!", g_symmetryEnabled ? "enabled" : "disabled");
     return appearanceChanged;
@@ -1880,6 +1949,15 @@ static int LoadCustomCatPreset(uint8_t* parts, int* defaultFrame, uint8_t* prese
     * resumes normal skip-filtered navigation...
     */
     PreservePresetLoadedAppearance(&appearance, loadedAppearanceMask);
+
+    /*
+    * Just like blank-art skipping, loading a custom_cats.gon preset must
+    * preserve the values the preset actually supplied. Don't let enabled
+    * Symmetry toggle immediately overwrite leg/arm/eye/brow/ear pairs. The
+    * toggle itself is still enabled, mirroring resumes when the user edits a
+    * symmetry-managed field or explicitly changes the Symmetry checkbox...
+    */
+    g_presetSymmetryBypass = 1;
     memset(g_idInputStates, 0, sizeof(g_idInputStates));
     g_activeIDInput = APPEARANCE_FIELD_COUNT;
     g_activeAppearancePath[0] = '\0';
@@ -2149,6 +2227,7 @@ static int RandomizeButton(uint8_t* parts)
 
     g_randomizeCatParts(parts, 3);
     ClearPresetSkipBlankBypass();
+    ClearPresetSymmetryBypass();
     ClearNamedAppearanceIDs();
     g_selectedPresetName[0] = '\0';
     memset(g_idInputStates, 0, sizeof(g_idInputStates));
@@ -2180,6 +2259,7 @@ static int NewCatButton(uint8_t* parts)
 
     g_randomizeCatParts(parts, 3);
     ClearPresetSkipBlankBypass();
+    ClearPresetSymmetryBypass();
     ClearNamedAppearanceIDs();
     g_selectedPresetName[0] = '\0';
     memset(g_idInputStates, 0, sizeof(g_idInputStates));
@@ -2734,16 +2814,18 @@ void HookSceneDraw(void* scene)
 
             if (savedCatChanged)
             {
-                // Saved .catstruct loads honor the user's active skip setting...
+                // Saved .catstruct loads honor the user's active skip and symmetry settings...
                 ClearPresetSkipBlankBypass();
+                ClearPresetSymmetryBypass();
                 changed = 1;
             }
         }
 
-        /* 
-        * Presets, NEW CAT and RANDOMIZE options can replace several CatParts values
-        * at once. Reapply the active symmetry constraint before rendering
-        * the grouped controls so symmetry remains a live editor invariant...
+        /*
+        * NEW CAT, RANDOMIZE and saved .catstruct loads obey the active symmetry
+        * constraint immediately. custom_cats.gon preset loads are an exception:
+        * ApplySymmetryGroups() sees g_presetSymmetryBypass and preserves the
+        * preset's exact left/right values until the next symmetry-managed edit...
         */
         changed |= ApplySymmetryGroups(parts);
         AddVerticalGap(DEBUG_SECTION_VERTICAL_GAP);
