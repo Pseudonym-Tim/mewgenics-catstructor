@@ -69,7 +69,7 @@ Catstructor is recommended for use with the [Custom Stray Framework](https://www
 
 Catstructor is compatible with [MewCatPartFramework](https://www.nexusmods.com/mewgenics/mods/489). Please read [this tutorial](https://github.com/Pseudonym-Tim/mew-cat-part-framework/#making-a-custom-cat-part-mod) explaining how you can add your own custom cat parts and textures. 
 
-You can have your cat use a custom modded part or texture by clicking the "**ID:**" field button next to **palette**, then typing in it's custom ID name, such as:
+You can have your cat use a custom modded part or texture by clicking the "**ID:**" field button next to the part or texture, then typing in it's custom ID name, such as:
 
 ```text
 @myPartOrTexture
