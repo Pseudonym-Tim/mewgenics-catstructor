@@ -23,7 +23,7 @@ After launching the game with Developer Mode enabled, click the new **Cat Editor
 
 Use the sliders, `<` and `>` buttons, dropdowns, and the clickable **ID:** button input fields to change the different parts of your cat!
 
-### Editor Buttons
+### Editor Buttons/Controls
 
 * **SAVE** - Saves your cat as a `.catstruct` file in:
 
@@ -46,6 +46,10 @@ Use the sliders, `<` and `>` buttons, dropdowns, and the clickable **ID:** butto
   ```
 
 * **EXIT GAME** - Immediately closes the game
+
+* **Symmetry** - Mirrors paired parts like eyes, ears, brows, legs, and arms
+
+* **Skip Blank/Repeated Art** - Mirrors paired parts like eyes, ears, brows, legs, and arms. Pairing their controls together.
 
 ### Voice Controls
 
